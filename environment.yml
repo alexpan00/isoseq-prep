@@ -1,0 +1,11 @@
+name: pacbio_tools
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.11
+  - pysam
+  - samtools
+  - pytest
+  - pip
