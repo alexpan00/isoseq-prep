@@ -37,4 +37,4 @@ If you'd like to add scripts or improve documentation, please:
 
 ## Contact
 
-For questions or help, contact the repository maintainer (see repo settings) or open an issue describing the problem, including sample filenames and exact commands you ran.
+For questions or help, open an issue describing the problem, including sample filenames and exact commands you ran.
