@@ -20,7 +20,7 @@ import gzip
 import os
 import re
 from collections import Counter, defaultdict
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 try:
     import pysam
@@ -82,13 +82,9 @@ def read_bam_seqs(path: str, limit: int) -> Iterable[str]:
                 break
 
 
-def find_polyA_candidates(seq: str, min_poly: int, search_window: int, max_adapter_len: int):
-    """Find adapters downstream of polyA or upstream of polyT in a sequence.
-
-    Returns list of adapter candidate strings (possibly empty).
-    """
+def find_polyA_candidates(seq: str, min_poly: int, search_window: int, max_adapter_len: int) -> Tuple[Optional[str], Optional[str]]:
+    """Return the adapter sequence (if any) and hit type ('A' or 'T')."""
     seq = seq.upper()
-    candidates = []
     # helper: reverse complement
     def revcomp(s: str) -> str:
         tr = str.maketrans('ATCGN', 'TAGCN')
@@ -121,7 +117,7 @@ def find_polyA_candidates(seq: str, min_poly: int, search_window: int, max_adapt
         if end < len(seq):
             adapter = seq[end:end + max_adapter_len]
             if adapter:
-                return [adapter], 'A'
+                return adapter, 'A'
 
     # If no polyA found, look for polyT in the leading window and apply the
     # same merging logic as for polyA. If multiple non-mergeable polyT regions
@@ -152,9 +148,8 @@ def find_polyA_candidates(seq: str, min_poly: int, search_window: int, max_adapt
             if adapter:
                 # reverse-complement the upstream adapter so it is in the same
                 # orientation as adapters found downstream of polyA
-                return [revcomp(adapter)], 'T'
-
-    return [], None
+                return revcomp(adapter), 'T'
+    return None, None
 
 
 def _build_weighted_consensus(seq_counts: List[Tuple[str, int]], min_support_frac: float = 0.5,
@@ -263,14 +258,11 @@ def main():
         seq = seq.strip()
         sampled_seqs.append(seq)
         total_reads += 1
-        candidates, hit = find_polyA_candidates(seq, min_poly, search_window, max_adapter_len)
-        if candidates:
-            for c in candidates:
-                # normalize: trim trailing Ns and spaces
-                c2 = c.rstrip('N')
-                if c2:
-                    adapter_counts[c2] += 1
-            # classify hit type from function return
+        adapter, hit = find_polyA_candidates(seq, min_poly, search_window, max_adapter_len)
+        if adapter:
+            c2 = adapter.rstrip('N')
+            if c2:
+                adapter_counts[c2] += 1
             if hit == 'A':
                 polyA_hits += 1
             elif hit == 'T':
