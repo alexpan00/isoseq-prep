@@ -24,7 +24,7 @@ def parse_args():
 def extract_zm_from_qname(qname):
 	"""Return the integer after the first '/' in the read name.
 
-	If the pattern is missing or not numeric, return 0.
+	If the pattern is missing or not numeric, return None.
 	Examples:
 	  'm64011_180916_202355/12345/ccs' -> 12345
 	  'movie/42' -> 42
@@ -37,6 +37,22 @@ def extract_zm_from_qname(qname):
 		except ValueError:
 			return None
 	return None
+
+
+def prepare_header(header_dict, pu_value):
+	"""Ensure every RG has PU and a READTYPE=CCS descriptor."""
+	rg_list = header_dict.get('RG', [])
+	if rg_list:
+		for rg in rg_list:
+			if 'PU' not in rg or not rg['PU']:
+				rg['PU'] = pu_value
+			ds_value = rg.get('DS', '') or ''
+			if 'READTYPE=CCS' not in ds_value:
+				separator = '' if not ds_value or ds_value.endswith(';') else ';'
+				rg['DS'] = f"{ds_value}{separator}READTYPE=CCS" if ds_value else 'READTYPE=CCS'
+	else:
+		header_dict['RG'] = [{'ID': 'RG0', 'PU': pu_value, 'DS': 'READTYPE=CCS'}]
+	return header_dict
 
 
 def main():
@@ -66,18 +82,7 @@ def main():
 			qn = first_aln.query_name or ''
 			pu = qn.split('/', 1)[0] if '/' in qn else qn
 
-		# Ensure 'RG' list exists and each entry has 'PU' and DS with READTYPE=CCS
-		rg_list = header_dict.get('RG', [])
-		if rg_list:
-			for rg in rg_list:
-				if 'PU' not in rg or not rg['PU']:
-					rg['PU'] = pu
-				ds_value = rg.get('DS', '') or ''
-				if 'READTYPE=CCS' not in ds_value:
-					separator = '' if not ds_value or ds_value.endswith(';') else ';'
-					rg['DS'] = f"{ds_value}{separator}READTYPE=CCS" if ds_value else 'READTYPE=CCS'
-		else:
-			header_dict['RG'] = [{'ID': 'RG0', 'PU': pu, 'DS': 'READTYPE=CCS'}]
+		header_dict = prepare_header(header_dict, pu)
 
 		with pysam.AlignmentFile(out_path, "wb", header=header_dict) as outh:
 			if first_aln is not None:
