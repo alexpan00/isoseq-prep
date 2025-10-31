@@ -28,15 +28,15 @@ def extract_zm_from_qname(qname):
 	Examples:
 	  'm64011_180916_202355/12345/ccs' -> 12345
 	  'movie/42' -> 42
-	  'no_slash' -> 0
+	  'no_slash' -> None
 	"""
 	m = re.match(r'^[^/]+/(\d+)', qname)
 	if m:
 		try:
 			return int(m.group(1))
 		except ValueError:
-			return 0
-	return 0
+			return None
+	return None
 
 
 def main():
@@ -49,51 +49,54 @@ def main():
 		print(f"Error: output file '{out_path}' already exists. Use --force to overwrite.", file=sys.stderr)
 		sys.exit(1)
 
-	# Determine PU from first read (the part before the first '/')
-	pu = 'unknown'
-	first_aln = None
-	with pysam.AlignmentFile(in_path, "rb", check_sq=False) as inh_probe:
-		try:
-			first_aln = next(inh_probe.fetch(until_eof=True))
-		except (ValueError, StopIteration):
-			# empty file / no alignments / fetch raised error
-			first_aln = None
-
-	if first_aln is not None:
-		qn = first_aln.query_name
-		pu = qn.split('/', 1)[0] if '/' in qn else qn
-
-	# Prepare/modify header to ensure RG entries have PU
-	with pysam.AlignmentFile(in_path, "rb", check_sq=False) as inh_header:
-		if hasattr(inh_header.header, 'to_dict'):
-			header_dict = inh_header.header.to_dict()
-		else:
-			# fallback: try converting to a plain dict
-			header_dict = dict(inh_header.header)
-
-	# Ensure 'RG' list exists and each entry has 'PU'
-	rg_list = header_dict.get('RG', [])
-	if rg_list:
-		for rg in rg_list:
-			if 'PU' not in rg or not rg['PU']:
-				rg['PU'] = pu
-	else:
-		# add a minimal RG entry
-		header_dict['RG'] = [{'ID': 'RG0', 'PU': pu}]
-
-	# Now process alignments and write output with modified header
+	# Single pass through BAM: open once, inspect first read, then stream through
 	count = 0
 	with pysam.AlignmentFile(in_path, "rb", check_sq=False) as inh:
+		header_obj = inh.header
+		if hasattr(header_obj, 'to_dict'):
+			header_dict = header_obj.to_dict()
+		else:
+			header_dict = dict(header_obj)
+
+		stream = inh.fetch(until_eof=True)
+		first_aln = next(stream, None)
+
+		pu = 'unknown'
+		if first_aln is not None:
+			qn = first_aln.query_name or ''
+			pu = qn.split('/', 1)[0] if '/' in qn else qn
+
+		# Ensure 'RG' list exists and each entry has 'PU' and DS with READTYPE=CCS
+		rg_list = header_dict.get('RG', [])
+		if rg_list:
+			for rg in rg_list:
+				if 'PU' not in rg or not rg['PU']:
+					rg['PU'] = pu
+				ds_value = rg.get('DS', '') or ''
+				if 'READTYPE=CCS' not in ds_value:
+					separator = '' if not ds_value or ds_value.endswith(';') else ';'
+					rg['DS'] = f"{ds_value}{separator}READTYPE=CCS" if ds_value else 'READTYPE=CCS'
+		else:
+			header_dict['RG'] = [{'ID': 'RG0', 'PU': pu, 'DS': 'READTYPE=CCS'}]
+
 		with pysam.AlignmentFile(out_path, "wb", header=header_dict) as outh:
-			for aln in inh.fetch(until_eof=True):
+			if first_aln is not None:
+				qname = first_aln.query_name
+				zm = extract_zm_from_qname(qname)
+				if zm is not None:
+					first_aln.set_tag('zm', zm, value_type='i')
+				else:
+					first_aln.set_tag('zm', count, value_type='i')
+				outh.write(first_aln)
+				count += 1
+
+			for aln in stream:
 				qname = aln.query_name
 				zm = extract_zm_from_qname(qname)
-				# set or replace tag 'zm' as integer
-				try:
+				if zm is not None:
 					aln.set_tag('zm', zm, value_type='i')
-				except TypeError:
-					# older pysam versions accept just set_tag(tag, value)
-					aln.set_tag('zm', zm)
+				else:
+					aln.set_tag('zm', count, value_type='i')
 				outh.write(aln)
 				count += 1
 				if args.verbose and count % 100000 == 0:
