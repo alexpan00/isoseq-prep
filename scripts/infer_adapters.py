@@ -317,8 +317,7 @@ def compute_core_and_barcodes(
         return "", Counter()
     else:
         core = core.strip("N")
-    print(f"Computed {orientation} core primer: {core}")
-    input()
+
     barcode_counts: Counter[str] = Counter()
     if multiplexed:
         core_len = len(core)
