@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
+"""Infer multiplexed Iso-Seq primer sequences.
+
+This script extends the heuristics from ``infer_adapters.py`` to handle
+multiplexed primers where several barcodes share a common primer core. It:
+
+* samples reads from a BAM/FASTQ file
+* finds polyA/polyT signals to locate adapter/primer segments
+* aggregates both 3' (downstream of polyA) and 5' (upstream of polyT) segments
+* computes weighted consensus sequences for the shared primer core
+* reports barcode sequences (prefix/suffix surrounding the core) with counts
+
+The goal is to distinguish the common primer portion from barcode-specific
+sequence, supporting cases where one or both ends are multiplexed.
 """
-Infer likely adapter sequences by searching for polyA tails (or polyT heads)
-in reads and collecting the sequence region downstream (after polyA) or
-upstream (before polyT) as adapter candidates. Produces a simple consensus
-adapter and top candidate sequences seen in the sample.
 
-Supports input as BAM (.bam) or FASTQ (.fastq/.fq, optionally gzipped).
-
-Usage examples:
-    python scripts/infer_adapters.py input.bam --sample 5000 --min-poly 10
-    python scripts/infer_adapters.py input.bam --multiplexed --max-adapter-len 45
-
-Note: this is a heuristic tool intended to find obvious polyA-adapter
-signatures; adjust parameters (sample size, poly length, search window) to
-match your data.
-
-When ``--multiplexed`` is supplied the script additionally reports shared
-primer cores and barcode counts for each end.
-"""
+from __future__ import annotations
 
 import argparse
 import gzip
@@ -29,267 +26,260 @@ from typing import Iterable, List, Optional, Tuple
 
 try:
     import pysam
-except Exception:
+except Exception:  # pragma: no cover - optional dependency
     pysam = None
 
-# Maximum gap (in bases) between separate polyA matches to merge into one
-# e.g. AAAAAAATAAAAA -> with MERGE_GAP=1 these will be merged into a single tail
 MERGE_GAP = 1
-# Fraction of weighted 'N' at a column above which the position is excluded
-# from the consensus (e.g., 0.1 == 10%)
 N_THRESHOLD = 0.1
 DEFAULT_SUPPORT_FRAC = 0.6
+MIN_POLYA_HIT_FRAC = 0.8  # minimum fraction of reads with polyA/polyT hits
 
 
-def revcomp_seq(s: str) -> str:
-    tr = str.maketrans('ATCGN', 'TAGCN')
-    return s.translate(tr)[::-1]
+def revcomp_seq(seq: str) -> str:
+    """Return the reverse complement of ``seq`` (A/T/C/G/N only)."""
+    table = str.maketrans("ATCGN", "TAGCN")
+    return seq.translate(table)[::-1]
 
 
-def parse_args():
-    p = argparse.ArgumentParser(description="Infer adapter from polyA/polyT signatures in reads")
-    p.add_argument("input", help="Input BAM or FASTQ file")
-    p.add_argument("--sample", type=int, default=2000, help="Number of reads to sample (default: 2000)")
-    p.add_argument("--min-poly", type=int, default=10, help="Minimum consecutive A/Ts to call polyA/polyT (default: 10)")
-    p.add_argument("--search-window", type=int, default=200, help="Search window from end/start for polyA/polyT (default: 200 nt)")
-    p.add_argument("--max-adapter-len", "--max-primer-len", dest="max_adapter_len", type=int, default=30, help="Maximum adapter/primer length to record per read (default: 30)")
-    p.add_argument("--multiplexed", action="store_true", help="Enable multiplex primer mode to infer shared cores and barcodes")
-    p.add_argument("--min-support", type=float, default=DEFAULT_SUPPORT_FRAC, help="Minimum support fraction for consensus columns (default: 0.6)")
-    p.add_argument("--n-threshold", type=float, default=N_THRESHOLD, help="Maximum 'N' fraction allowed per consensus column (default: 0.1)")
-    p.add_argument("--top", type=int, default=20, help="Report at most this many barcode sequences per end when multiplexed (default: 20)")
-    p.add_argument("--verbose", action="store_true")
-    return p.parse_args()
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Infer multiplexed primers from polyA/polyT signatures"
+    )
+    parser.add_argument("input", help="Input BAM or FASTQ file (optionally gzipped)")
+    parser.add_argument(
+        "--sample",
+        type=int,
+        default=2000,
+        help="Number of reads to sample (default: 2000)",
+    )
+    parser.add_argument(
+        "--min-poly",
+        type=int,
+        default=10,
+        help="Minimum consecutive A/T bases to call polyA/polyT (default: 10)",
+    )
+    parser.add_argument(
+        "--search-window",
+        type=int,
+        default=200,
+        help="Window length from read end/start to search for polyA/polyT (default: 200)",
+    )
+    parser.add_argument(
+        "--max-primer-len",
+        type=int,
+        default=45,
+        help="Maximum primer length to record from each end (default: 45)",
+    )
+    parser.add_argument(
+        "--min-support",
+        type=float,
+        default=DEFAULT_SUPPORT_FRAC,
+        help="Minimum support fraction for consensus columns (default: 0.6)",
+    )
+    parser.add_argument(
+        "--n-threshold",
+        type=float,
+        default=N_THRESHOLD,
+        help="Maximum fraction of 'N' votes allowed per consensus column (default: 0.1)",
+    )
+    parser.add_argument(
+        "--multiplexed",
+        action="store_true",
+        help="Enable multiplexed primer detection",
+    )
+    parser.add_argument(
+        "--top",
+        type=int,
+        default=20,
+        help="Report at most this many barcode sequences per end (default: 20)",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print progress every 1000 reads",
+    )
+    return parser.parse_args()
 
 
 def read_fastq_seqs(path: str, limit: int) -> Iterable[str]:
-    opener = gzip.open if path.lower().endswith('.gz') else open
-    with opener(path, 'rt') as fh:
-        i = 0
-        while True:
+    opener = gzip.open if path.lower().endswith(".gz") else open
+    with opener(path, "rt") as fh:
+        for i in range(limit):
             header = fh.readline()
             if not header:
                 break
-            seq = fh.readline().strip()
-            fh.readline()  # +
-            fh.readline()  # qual
-            yield seq
-            i += 1
-            if i >= limit:
+            seq = fh.readline()
+            if not seq:
                 break
+            yield seq.strip()
+            fh.readline()  # '+'
+            fh.readline()  # quality
 
 
 def read_bam_seqs(path: str, limit: int) -> Iterable[str]:
     if pysam is None:
-        raise RuntimeError("pysam is required to read BAM files; install pysam or provide FASTQ input")
+        raise RuntimeError("pysam is required for BAM input; install pysam or provide FASTQ")
     with pysam.AlignmentFile(path, "rb", check_sq=False) as bam:
-        i = 0
+        count = 0
         for aln in bam.fetch(until_eof=True):
             seq = aln.query_sequence
             if seq:
                 yield seq
-                i += 1
-            if i >= limit:
-                break
+                count += 1
+                if count >= limit:
+                    break
 
 
-def find_polyA_candidates(seq: str, min_poly: int, search_window: int, max_adapter_len: int) -> Tuple[Optional[str], Optional[str]]:
+def iterate_sequences(path: str, sample: int) -> Iterable[str]:
+    path_lower = path.lower()
+    if path_lower.endswith(".bam"):
+        return read_bam_seqs(path, sample)
+    if path_lower.endswith((".fastq", ".fq", ".fastq.gz", ".fq.gz")):
+        return read_fastq_seqs(path, sample)
+    # fallback attempts
+    if pysam is not None and os.path.exists(path):
+        try:
+            return read_bam_seqs(path, sample)
+        except Exception:
+            return read_fastq_seqs(path, sample)
+    return read_fastq_seqs(path, sample)
+
+
+def find_polyA_candidates(
+    seq: str, min_poly: int, search_window: int, max_adapter_len: int
+) -> Tuple[Optional[str], Optional[str]]:
     """Return the adapter sequence (if any) and hit type ('A' or 'T')."""
     seq = seq.upper()
-    # helper: reverse complement
-    def revcomp(s: str) -> str:
-        tr = str.maketrans('ATCGN', 'TAGCN')
-        return s.translate(tr)[::-1]
-
-    # polyA: look in trailing window first. If found, do NOT search polyT.
-    tail = seq[-search_window:] if len(seq) >= search_window else seq
-    # find all polyA runs within the tail
-    matches = [m for m in re.finditer(r'A{%d,}' % min_poly, tail)]
-    if matches:
-        # convert to full-seq coordinates
-        regions = []
-        base_off = len(seq) - len(tail)
-        for m in matches:
-            regions.append([base_off + m.start(), base_off + m.end()])
-        # merge nearby regions using MERGE_GAP
-        merged = []
-        cur_start, cur_end = regions[0]
+    
+    def merge_regions(regions: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+        merged: List[Tuple[int, int]] = []
+        start, end = regions[0]
         for s, e in regions[1:]:
-            if s - cur_end <= MERGE_GAP:
-                # extend current region
-                cur_end = max(cur_end, e)
+            if s - end <= MERGE_GAP:
+                end = max(end, e)
             else:
-                merged.append((cur_start, cur_end))
-                cur_start, cur_end = s, e
-        merged.append((cur_start, cur_end))
-        # choose the last merged region (closest to read end)
-        start, end = merged[-1]
-        # adapter region is downstream of the polyA (within the read)
-        if end < len(seq):
-            adapter = seq[end:end + max_adapter_len]
-            if adapter:
-                return adapter, 'A'
+                merged.append((start, end))
+                start, end = s, e
+        merged.append((start, end))
+        return merged
 
-    # If no polyA found, look for polyT in the leading window and apply the
-    # same merging logic as for polyA. If multiple non-mergeable polyT regions
-    # exist, report the first (most 5' end) region and take the upstream
-    # sequence as the adapter (reverse-complemented to match polyA orientation).
-    head = seq[:search_window] if len(seq) >= search_window else seq
-    matches_t = [m for m in re.finditer(r'T{%d,}' % min_poly, head)]
-    if matches_t:
-        regions_t = []
-        for m in matches_t:
-            regions_t.append([m.start(), m.end()])
-        # merge nearby regions using MERGE_GAP
-        merged_t = []
-        cur_start, cur_end = regions_t[0]
-        for s, e in regions_t[1:]:
-            if s - cur_end <= MERGE_GAP:
-                cur_end = max(cur_end, e)
-            else:
-                merged_t.append((cur_start, cur_end))
-                cur_start, cur_end = s, e
-        merged_t.append((cur_start, cur_end))
-        # choose the first merged region (closest to 5' end)
-        start, end = merged_t[0]
-        # adapter region is upstream/before the polyT (i.e., prefix immediately before polyT)
-        if start > 0:
-            s = max(0, start - max_adapter_len)
-            adapter = seq[s:start]
+    tail = seq[-search_window:] if len(seq) >= search_window else seq
+    matches = list(re.finditer(r"A{%d,}" % min_poly, tail))
+    if matches:
+        # Define read start position based on tail offset
+        base_offset = len(seq) - len(tail)
+        regions: List[Tuple[int, int]] = []
+        for m in matches:
+            regions.append((base_offset + m.start(), base_offset + m.end()))
+        merged: List[Tuple[int, int]] = merge_regions(regions)
+        
+        # use the last merged region to extract adapter. This avoids picking up
+        # internal polyA stretches.
+        start, end = merged[-1]
+        if end < len(seq):
+            # the adapter is everything downstream of the polyA stretch
+            adapter = seq[end :]
             if adapter:
-                # reverse-complement the upstream adapter so it is in the same
-                # orientation as adapters found downstream of polyA
-                return revcomp(adapter), 'T'
+                return adapter, "A"
+
+    head = seq[:search_window] if len(seq) >= search_window else seq
+    matches_t = list(re.finditer(r"T{%d,}" % min_poly, head))
+    if matches_t:
+        regions_t: List[Tuple[int, int]] = [(m.start(), m.end()) for m in matches_t]
+        merged_t: List[Tuple[int, int]] = merge_regions(regions_t)
+        start, end = merged_t[0]
+        if start > 0:
+            # the adapter is everything upstream of the polyT stretch
+            adapter = seq[:start]
+            if adapter:
+                return revcomp_seq(adapter), "T"
     return None, None
 
 
-def _build_weighted_consensus(seq_counts: List[Tuple[str, int]], min_support_frac: float = 0.5,
-                              n_threshold: float = 0.1, align: str = 'right') -> str:
-    """Generalized weighted consensus builder.
-
-    seq_counts: list of (sequence, count) pairs.
-    align: 'right' for 3' consensus (pad left with N), 'left' for 5' consensus
-           (pad right with N).
-    The algorithm walks from the anchor end (right for 'right', left for
-    'left') and collects bases until a column fails the N-threshold or
-    the min_support_frac among non-N weighted votes.
-    """
-    if not seq_counts:
-        return ""
-    maxlen = max(len(s) for s, _ in seq_counts)
-    padded = []
-    for s, cnt in seq_counts:
-        if align == 'right':
-            pad = 'N' * (maxlen - len(s)) + s
-        else:
-            pad = s + 'N' * (maxlen - len(s))
-        padded.append((pad, cnt))
-
-    # choose iteration order depending on alignment
-    if align == 'right':
-        indices = range(maxlen - 1, -1, -1)
-        collect_rev = True
-    else:
-        indices = range(0, maxlen)
-        collect_rev = False
-
-    collected = []
-    for i in indices:
-        col_counter = Counter()
-        total = 0
-        n_weight = 0
-        for seq, cnt in padded:
-            base = seq[i]
-            col_counter[base] += cnt
-            total += cnt
-            if base == 'N':
-                n_weight += cnt
-        if total == 0:
-            break
-        if (n_weight / total) > n_threshold:
-            break
-        # exclude N for majority calculation
-        col_counter_noN = Counter({b: w for b, w in col_counter.items() if b != 'N'})
-        if not col_counter_noN:
-            break
-        base, count = col_counter_noN.most_common(1)[0]
-        non_n_total = total - n_weight
-        if non_n_total <= 0:
-            break
-        if (count / non_n_total) < min_support_frac:
-            break
-        collected.append(base)
-
-    if collect_rev:
-        return ''.join(reversed(collected))
-    return ''.join(collected)
-
-
-def build_consensus(seq_counts: List[Tuple[str, int]], min_support_frac: float = 0.5, n_threshold: float = 0.1) -> str:
-    return _build_weighted_consensus(seq_counts, min_support_frac=min_support_frac, n_threshold=n_threshold, align='right')
-
-
-def build_consensus_left(seq_counts: List[Tuple[str, int]], min_support_frac: float = 0.5, n_threshold: float = 0.1) -> str:
-    return _build_weighted_consensus(seq_counts, min_support_frac=min_support_frac, n_threshold=n_threshold, align='left')
-
-
-def build_consensus_padded(
+def _build_weighted_consensus(
     seq_counts: List[Tuple[str, int]],
     min_support_frac: float,
     n_threshold: float,
     align: str,
 ) -> str:
-    """Consensus builder that keeps walking after weak columns by emitting 'N'."""
+    '''
+    Function to generate a consensus sequences from counter
+
+    Args:
+        seq_counts (List[Tuple[str, int]]): Counter of adapter sequences
+        min_support_frac (float): minimum support fraction for consensus
+        n_threshold (float): N threshold for consensus
+        align (str): alignment direction ("left" or "right")
+
+    Returns:
+        str: consensus sequence
+    '''
     if not seq_counts:
         return ""
+    # max length of sequences (needed for padding)
     maxlen = max(len(s) for s, _ in seq_counts)
     padded = []
+    
+    # Padding of the reads, right for 3' consensus and left for 5' consensus
+    # ex. AAAAAGCT, AAAAAGGCT (with G duplication) -> GCT, GGCT -> NGCT, GGCT
+    # this way the presence of insertions in 3' adaptors lead to positions in 5'
+    # consensus with lots of Ns that get discarded
     for seq, weight in seq_counts:
-        if align == 'right':
-            pad = 'N' * (maxlen - len(seq)) + seq
+        if align == "right":
+            pad = "N" * (maxlen - len(seq)) + seq
         else:
-            pad = seq + 'N' * (maxlen - len(seq))
+            pad = seq + "N" * (maxlen - len(seq))
         padded.append((pad, weight))
 
-    if align == 'right':
-        indices = range(maxlen - 1, -1, -1)
-        reverse_out = True
-    else:
-        indices = range(maxlen)
-        reverse_out = False
-
+    # list to store the consensus bases
     collected: List[str] = []
-    for idx in indices:
-        column = Counter()
+    for idx in range(maxlen):
+        counter = Counter()
         total = 0
         n_weight = 0
+        # Build the base counts for this position
         for seq, weight in padded:
             base = seq[idx]
-            column[base] += weight
+            counter[base] += weight
             total += weight
-            if base == 'N':
+            if base == "N":
                 n_weight += weight
-        if total == 0:
-            collected.append('N')
-            continue
-        if (n_weight / total) > n_threshold:
-            collected.append('N')
-            continue
-        non_n = {base: weight for base, weight in column.items() if base != 'N'}
-        if not non_n:
-            collected.append('N')
-            continue
+
+        # Compute statistics and decide consensus base
+        non_n = {base: w for base, w in counter.items() if base != "N"}
         base, count = Counter(non_n).most_common(1)[0]
         support = total - n_weight
-        if support <= 0:
-            collected.append('N')
-            continue
-        if (count / support) < min_support_frac:
-            collected.append('N')
-            continue
-        collected.append(base)
+        # Ratio of N votes too high
+        if n_weight / total > n_threshold:
+            collected.append("N")
+        # Ratio of top base too low
+        elif count / support < min_support_frac:
+            collected.append("N")
+        else:
+            collected.append(base)
 
-    result = ''.join(reversed(collected)) if reverse_out else ''.join(collected)
-    return result
+    return "".join(collected)
+
+
+def build_consensus(
+    seq_counts: List[Tuple[str, int]],
+    min_support_frac: float,
+    n_threshold: float,
+    align: str,
+) -> str:
+    '''
+    Wrapper to _build_weighted_consensus
+
+    Args:
+        seq_counts (List[Tuple[str, int]]): Counter of adapter sequences
+        min_support_frac (float): minimum support fraction for consensus
+        n_threshold (float): N threshold for consensus
+        align (str): alignment direction ("left" or "right")
+
+    Returns:
+        str: consensus sequence
+    '''
+    return _build_weighted_consensus(seq_counts, min_support_frac, n_threshold, align)
 
 
 def compute_core_and_barcodes(
@@ -297,33 +287,54 @@ def compute_core_and_barcodes(
     orientation: str,
     min_support_frac: float,
     n_threshold: float,
+    multiplexed: bool,
 ) -> Tuple[str, Counter[str]]:
+    '''
+    Function to call the core primer sequence and potentially
+    identify the sample barcodes
+
+    Args:
+        counter (Counter[str]): counter of adapter sequences
+        orientation (str): 5' or 3' end
+        min_support_frac (float): minimum support fraction for consensus
+        n_threshold (float): N threshold for consensus
+        multiplexed (bool): whether the data is multiplexed
+
+    Returns:
+        Tuple[str, Counter[str]]: core primer sequence and barcode counts
+    '''
     if not counter:
         return "", Counter()
     seq_counts = counter.most_common()
-    align = 'left' if orientation == '3p' else 'right'
-    core = build_consensus_padded(seq_counts, min_support_frac, n_threshold, align)
-    core = core.strip('N') if core else ""
+    align_map = {
+        "3p": "left",   # build 3' consensus from right to left
+        "5p": "left",  # build 5' consensus from left to right
+    }
+    align = align_map.get(orientation, "left")
+    core = build_consensus(seq_counts, min_support_frac, n_threshold, align)
+
     if not core:
         return "", Counter()
-    core_len = len(core)
+    else:
+        core = core.strip("N")
+    print(f"Computed {orientation} core primer: {core}")
+    input()
     barcode_counts: Counter[str] = Counter()
-    for seq, weight in counter.items():
-        if len(seq) < core_len:
-            continue
-        if orientation == '5p':
-            idx = seq.rfind(core)
-            if idx == -1:
-                barcode = seq[:-core_len]
+    if multiplexed:
+        core_len = len(core)
+        for seq, weight in counter.items():
+            if len(seq) < core_len:
+                continue
+            if orientation == "5p":
+                idx = seq.rfind(core[:10])
+                if idx == -1:
+                    barcode = seq[:-core_len]
+                else:
+                    barcode = seq[:idx]
             else:
-                barcode = seq[:idx]
-        else:
-            idx = seq.find(core)
-            if idx == -1:
                 barcode = seq[core_len:]
-            else:
-                barcode = seq[idx + core_len :]
-        barcode_counts[barcode] += weight
+
+            barcode_counts[barcode] += weight
     return core, barcode_counts
 
 
@@ -334,10 +345,11 @@ class PrimerStats:
 
     def report(self, label: str, limit: int) -> None:
         print(f"\n{label} primer core length: {len(self.core)}")
-        if not self.core:
+        if self.core:
+            print(f"{label} primer core: {self.core}")
+        else:
             print(f"No reliable {label.lower()} primer core detected.")
             return
-        print(f"{label} primer core: {self.core}")
         if not self.barcode_counts:
             print(f"No barcode diversity detected for {label.lower()} primer.")
             return
@@ -349,150 +361,111 @@ class PrimerStats:
             print(f"  {name}\t{count}\t{frac:.2%}")
 
 
-def analyze_multiplexed_primers(
+def analyze_primers(
     three_prime_counts: Counter[str],
     five_prime_counts: Counter[str],
-    min_support_frac: float,
-    n_threshold: float,
-    report_limit: int,
-) -> None:
-    three_core, three_barcodes = compute_core_and_barcodes(three_prime_counts, '3p', min_support_frac, n_threshold)
-    five_core, five_barcodes = compute_core_and_barcodes(five_prime_counts, '5p', min_support_frac, n_threshold)
+    args: argparse.Namespace,
+) -> dict:
+    """
+    Compute primer cores and barcode counts for 3' and 5' ends and return
+    a dictionary with the results. This function does not perform any
+    printing; use `show_primer_results` to display the returned data.
+    """
+    three_core, three_barcodes = compute_core_and_barcodes(
+        three_prime_counts, "3p", args.min_support, args.n_threshold, args.multiplexed
+    )
+    five_core, five_barcodes = compute_core_and_barcodes(
+        five_prime_counts, "5p", args.min_support, args.n_threshold, args.multiplexed
+    )
 
-    PrimerStats(three_core, three_barcodes).report("3'", report_limit)
-    PrimerStats(five_core, five_barcodes).report("5'", report_limit)
+    return {
+        "3p": {"core": three_core, "barcodes": three_barcodes},
+        "5p": {"core": five_core, "barcodes": five_barcodes},
+    }
 
 
-def main():
+def show_primer_results(results: dict, args: argparse.Namespace) -> None:
+    """
+    Pretty-print primer analysis results produced by `analyze_primers`.
+    """
+    three = results.get("3p", {})
+    five = results.get("5p", {})
+
+    PrimerStats(three.get("core", ""), three.get("barcodes", Counter())).report("3'", args.top)
+    PrimerStats(five.get("core", ""), five.get("barcodes", Counter())).report("5'", args.top)
+
+
+def main() -> None:
     args = parse_args()
 
-    path = args.input
-    sample = args.sample
-    min_poly = args.min_poly
-    search_window = args.search_window
-    max_adapter_len = args.max_adapter_len
+    # Generate sequence iterator
+    seq_iter = iterate_sequences(args.input, args.sample)
 
-    seq_iter = None
-    if path.lower().endswith('.bam'):
-        if pysam is None:
-            raise SystemExit("pysam not available; install pysam to read BAM files or provide FASTQ input")
-        seq_iter = read_bam_seqs(path, sample)
-    elif any(path.lower().endswith(ext) for ext in ('.fastq', '.fq', '.fastq.gz', '.fq.gz')):
-        seq_iter = read_fastq_seqs(path, sample)
-    else:
-        # try BAM first, fallback to FASTQ
-        if pysam is not None and os.path.exists(path):
-            try:
-                seq_iter = read_bam_seqs(path, sample)
-            except Exception:
-                seq_iter = read_fastq_seqs(path, sample)
-        else:
-            seq_iter = read_fastq_seqs(path, sample)
-
-    adapter_counts = Counter()
-    five_prime_counts = Counter()
-    total_reads = 0
+    # string counter for 5' and 3' end sequences
+    adapter_counts: Counter[str] = Counter()
+    five_prime_counts: Counter[str] = Counter()
+    sampled = 0
     polyA_hits = 0
     polyT_hits = 0
-    sampled_seqs = []
 
+    # sample sequences and extract candidate primers (could be refactored)
     for seq in seq_iter:
-        seq = seq.strip()
-        sampled_seqs.append(seq)
-        total_reads += 1
-        adapter, hit = find_polyA_candidates(seq, min_poly, search_window, max_adapter_len)
-        if adapter:
-            c2 = adapter.rstrip('N')
-            if c2:
-                adapter_counts[c2] += 1
-            if hit == 'A':
-                polyA_hits += 1
-            cand5 = seq[:max_adapter_len] if len(seq) >= max_adapter_len else seq
-            cand5 = cand5.rstrip('N')
-            if cand5:
-                five_prime_counts[cand5] += 1
-            elif hit == 'T':
-                polyT_hits += 1
-            tail = seq[-max_adapter_len:] if len(seq) >= max_adapter_len else seq
-            cand5 = revcomp_seq(tail)
-            cand5 = cand5.rstrip('N')
-            if cand5:
-                five_prime_counts[cand5] += 1
-        if args.verbose and total_reads % 1000 == 0:
-            print(f"Processed {total_reads} reads, adapter candidates so far: {len(adapter_counts)}")
-
-    # summarize
-    print(f"Reads sampled: {total_reads}")
-    print(f"PolyA-like hits (tail): {polyA_hits}")
-    print(f"PolyT-like hits (head): {polyT_hits}")
-
-    if not adapter_counts:
-        print("No adapter candidates found with the current parameters.")
-        return
-
-    # show top candidates
-    print("\nTop adapter candidate sequences:")
-    top = adapter_counts.most_common(10)
-    for s, cnt in top:
-        print(f"  {s}\t{cnt}")
-
-    # pass (sequence, count) pairs to build_consensus so consensus is weighted
-    consensus = build_consensus(top, min_support_frac=args.min_support, n_threshold=args.n_threshold)
-    if consensus:
-        print(f"\nConsensus adapter (3' end, from top candidates): {consensus}")
-    else:
-        print("\nNo strong column-wise consensus could be built from top candidates.")
-
-    # Now attempt to infer the 5' adapter consensus of the same length
-    L = len(consensus)
-    if L == 0:
-        return
-
-    adapter5_counts = Counter()
-    for seq in sampled_seqs:
-        # detect if this read had a polyA or polyT (reuse detection)
-        _, hit = find_polyA_candidates(seq, min_poly, search_window, max_adapter_len)
-        if not hit:
+        seq = seq.strip().upper()
+        if not seq:
             continue
-        # for reads with polyA at the tail, take the first L bases
-        if hit == 'A':
-            if len(seq) >= L:
-                cand = seq[:L].upper()
-                adapter5_counts[cand] += 1
-        elif hit == 'T':
-            # for polyT reads, extract last L bases and reverse-complement them
-            if len(seq) >= L:
-                tail = seq[-L:].upper()
-                cand = revcomp_seq(tail)
-                adapter5_counts[cand] += 1
+        sampled += 1
+        # Find polyA/polyT and extract candidate primers from 3' end
+        adapter, hit = find_polyA_candidates(seq, args.min_poly, 
+                                             args.search_window, 
+                                             args.max_primer_len)
+        if adapter:
+            trimmed = adapter.rstrip("N")
+            if trimmed:
+                adapter_counts[trimmed] += 1
+        # Adapter found at the 3' end
+        if hit == "A":
+            polyA_hits += 1
+            if len(seq) >= args.max_primer_len:
+                cand5 = seq[: args.max_primer_len]
+            else:
+                cand5 = seq
+            cand5 = cand5.rstrip("N")
+            if cand5:
+                five_prime_counts[cand5] += 1
+        # Adapter found at the 5' end
+        elif hit == "T":
+            polyT_hits += 1
+            if len(seq) >= args.max_primer_len:
+                tail = seq[-args.max_primer_len :]
+            else:
+                tail = seq
+            cand5 = revcomp_seq(tail)
+            cand5 = cand5.rstrip("N")
+            if cand5:
+                five_prime_counts[cand5] += 1
+        if args.verbose and sampled % 1000 == 0:
+            print(
+                f"Processed {sampled} reads | 3' adapters: {len(adapter_counts)} | 5' candidates: {len(five_prime_counts)}"
+            )
 
-    if not adapter5_counts:
-        print("\nNo 5' adapter candidates found (insufficient data).")
-        return
-
-    print("\nTop 5' adapter candidate sequences:")
-    top5 = adapter5_counts.most_common(1000)
-    i = 0
-    while i < len(top5) and i < 5:
-        s, cnt = top5[i]
-        print(f"  {s}\t{cnt}")
-        i += 1
-
-    consensus5 = build_consensus_left(top5, min_support_frac=args.min_support, n_threshold=args.n_threshold)
-    if consensus5:
-        print(f"\nConsensus adapter (5' end): {consensus5}")
+    # Initial sampling results, in case potential primers are found end here
+    # Could mean that the reads end in polyA or have already been fully-trimmed
+    print(f"Reads sampled: {sampled}")
+    print(f"PolyA tail hits (3'): {polyA_hits}")
+    print(f"PolyT head hits (5'): {polyT_hits}")
+    
+    # if the proportion of polyA/polyT hits is too low, likely that reads are
+    # fully-trimmed (isoseq refine)
+    if polyA_hits + polyT_hits < sampled*MIN_POLYA_HIT_FRAC:
+        print("PolyA detection rate too low; reads may be fully-trimmed.")
+        print("EXITING.")
+    # if the sum of adapter counts is very low, likely no primers detected
+    elif sum(adapter_counts.values()) + sum(five_prime_counts.values()) < sampled*MIN_POLYA_HIT_FRAC:
+        print("No primer candidates detected downstream the polyA")
+        print("EXITING.")
     else:
-        print("\nNo strong 5' consensus could be built from top candidates.")
+        primers_res = analyze_primers(adapter_counts, five_prime_counts, args)
+        show_primer_results(primers_res, args)
 
-    if args.multiplexed:
-        analyze_multiplexed_primers(
-            adapter_counts,
-            five_prime_counts,
-            args.min_support,
-            args.n_threshold,
-            args.top,
-        )
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
