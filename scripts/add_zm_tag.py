@@ -63,15 +63,23 @@ def collect_header_and_pus(in_path):
 	return header_dict, pu_values
 
 
-def prepare_header(header_dict, pu_values):
-	"""Add RG lines for new PU values while keeping existing entries simple."""
+def prepare_header(header_dict: dict, pu_values: set) -> tuple[dict, dict]:
+	"""Add RG lines for new PU values while keeping existing entries simple.
+	Args:
+		header_dict: BAM header as a dictionary.
+		pu_values: Set of observed PU values.
+	Returns:
+		Tuple of (updated_header_dict, pu_to_rg_dict)
+  	"""
 	rg_list = list(header_dict.get('RG', []) or [])
 	pu_to_rg = {}
 	used_ids = set()
 	next_index = len(rg_list)
-	print(pu_values)
+ 
+	# check if the existing RG entries have IDs and PUs
 	for rg in rg_list:
 		rg_id = rg.get('ID')
+		# if there is not id create one
 		if not rg_id:
 			rg_id = f"RG{next_index}"
 			while rg_id in used_ids:
@@ -81,18 +89,20 @@ def prepare_header(header_dict, pu_values):
 			rg['ID'] = rg_id
 		if rg_id:
 			used_ids.add(rg_id)
-		if pu_value := rg.get('PU'):
-			rg['PU'] = pu_value
-		else:
+
+		# if there is not PU, assign one from the set
+		if rg.get('PU') is None:
 			pu_value = pu_values.pop()
 			rg['PU'] = pu_value
 		pu_to_rg.setdefault(pu_value, rg_id)
+		# Ensure DS tag includes READTYPE=CCS, otherwise isoseq refine will complain
 		ds_value = rg.get('DS', '') or ''
 		if 'READTYPE=CCS' not in ds_value:
 			separator = '' if not ds_value or ds_value.endswith(';') else ';'
 			rg['DS'] = f"{ds_value}{separator}READTYPE=CCS" if ds_value else 'READTYPE=CCS'
 		rg['SM'] = pu_value
 
+	# Now add RG entries for any remaining PU values
 	while pu_values:
 		pu = pu_values.pop()
 		rg_id = f"RG{next_index}"
@@ -111,13 +121,14 @@ def prepare_header(header_dict, pu_values):
 def main():
 	args = parse_args()
 
+	# I/O paths
 	in_path = args.input
 	out_path = args.output or (in_path + ".zm.bam" if not in_path.lower().endswith('.bam') else in_path[:-4] + ".zm.bam")
-
 	if os.path.exists(out_path) and not args.force:
 		print(f"Error: output file '{out_path}' already exists. Use --force to overwrite.", file=sys.stderr)
 		sys.exit(1)
 
+	# First pass: collect header and PU values
 	header_dict, pu_values = collect_header_and_pus(in_path)
 	header_dict, pu_to_rg = prepare_header(header_dict, pu_values)
 

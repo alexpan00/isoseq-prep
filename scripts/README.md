@@ -38,3 +38,27 @@ Currently included scripts
       correct heuristic for your data, consider adjusting the script or
       providing a constant PU and/or mapping logic.
 
+- `infer_adapters.py`
+  - Purpose: Sample reads from a BAM or FASTQ file, detect polyA/polyT signals,
+    and infer Iso-Seq adapter or multiplexed primer cores. With the
+    `--multiplexed` flag it separates shared primer cores from barcode flanks
+    and reports barcode counts for both read ends.
+
+  - Usage examples:
+
+    ```bash
+    # infer standard adapter cores
+    python scripts/infer_adapters.py sample.bam --sample 5000
+
+    # include multiplex mode and show top 10 barcodes per end
+    python scripts/infer_adapters.py sample.bam --multiplexed --top 10
+    ```
+
+  - Notes & dependencies:
+    - Requires `pysam` for BAM input; FASTQ input (plain or gzipped) works
+      without `pysam`.
+    - Sampling and polyA/polyT heuristics are tunable via CLI flags such as
+      `--sample`, `--min-poly`, and `--search-window`.
+    - When multiplex mode is disabled, barcode reporting is skipped and only
+      primer cores are emitted.
+
