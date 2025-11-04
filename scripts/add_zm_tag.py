@@ -30,6 +30,8 @@ def extract_zm_from_qname(qname):
 	  'movie/42' -> 42
 	  'no_slash' -> None
 	"""
+	if not qname:
+		return None
 	m = re.match(r'^[^/]+/(\d+)', qname)
 	if m:
 		try:
@@ -39,20 +41,72 @@ def extract_zm_from_qname(qname):
 	return None
 
 
-def prepare_header(header_dict, pu_value):
-	"""Ensure every RG has PU and a READTYPE=CCS descriptor."""
-	rg_list = header_dict.get('RG', [])
-	if rg_list:
-		for rg in rg_list:
-			if 'PU' not in rg or not rg['PU']:
-				rg['PU'] = pu_value
-			ds_value = rg.get('DS', '') or ''
-			if 'READTYPE=CCS' not in ds_value:
-				separator = '' if not ds_value or ds_value.endswith(';') else ';'
-				rg['DS'] = f"{ds_value}{separator}READTYPE=CCS" if ds_value else 'READTYPE=CCS'
-	else:
-		header_dict['RG'] = [{'ID': 'RG0', 'PU': pu_value, 'DS': 'READTYPE=CCS'}]
-	return header_dict
+def derive_pu_from_qname(qname):
+	"""Return the prefix before the first '/' in the read name or 'unknown'."""
+	qn = qname or ''
+	pu = qn.split('/', 1)[0] if '/' in qn else qn
+	return pu if pu else 'unknown'
+
+
+def collect_header_and_pus(in_path):
+	"""Scan the BAM once to collect header info and observed PU values."""
+	pu_values = set()
+	with pysam.AlignmentFile(in_path, "rb", check_sq=False) as inh:
+		header_obj = inh.header
+		if hasattr(header_obj, 'to_dict'):
+			header_dict = header_obj.to_dict()
+		else:
+			header_dict = dict(header_obj)
+		for aln in inh.fetch(until_eof=True):
+			pu = derive_pu_from_qname(aln.query_name)
+			pu_values.add(pu)
+	return header_dict, pu_values
+
+
+def prepare_header(header_dict, pu_values):
+	"""Add RG lines for new PU values while keeping existing entries simple."""
+	rg_list = list(header_dict.get('RG', []) or [])
+	pu_to_rg = {}
+	used_ids = set()
+	next_index = len(rg_list)
+	print(pu_values)
+	for rg in rg_list:
+		rg_id = rg.get('ID')
+		if not rg_id:
+			rg_id = f"RG{next_index}"
+			while rg_id in used_ids:
+				next_index += 1
+				rg_id = f"RG{next_index}"
+			next_index += 1
+			rg['ID'] = rg_id
+		if rg_id:
+			used_ids.add(rg_id)
+		if pu_value := rg.get('PU'):
+			rg['PU'] = pu_value
+		else:
+			pu_value = pu_values.pop()
+			rg['PU'] = pu_value
+		pu_to_rg.setdefault(pu_value, rg_id)
+		ds_value = rg.get('DS', '') or ''
+		if 'READTYPE=CCS' not in ds_value:
+			separator = '' if not ds_value or ds_value.endswith(';') else ';'
+			rg['DS'] = f"{ds_value}{separator}READTYPE=CCS" if ds_value else 'READTYPE=CCS'
+		rg['SM'] = pu_value
+
+	if len(pu_values) > len(rg_list):
+		while pu_values:
+			pu = pu_values.pop()
+			rg_id = f"RG{next_index}"
+			while rg_id in used_ids:
+				next_index += 1
+				rg_id = f"RG{next_index}"
+			rg_list.append({'ID': rg_id, 'SM':pu, 'PU': pu, 'DS': 'READTYPE=CCS'})
+			pu_to_rg[pu] = rg_id
+			used_ids.add(rg_id)
+			next_index += 1
+
+	header_dict['RG'] = rg_list
+	return header_dict, pu_to_rg
 
 
 def main():
@@ -65,47 +119,33 @@ def main():
 		print(f"Error: output file '{out_path}' already exists. Use --force to overwrite.", file=sys.stderr)
 		sys.exit(1)
 
-	# Single pass through BAM: open once, inspect first read, then stream through
+	header_dict, pu_values = collect_header_and_pus(in_path)
+	header_dict, pu_to_rg = prepare_header(header_dict, pu_values)
+
+	if args.verbose and pu_values:
+		unique_pus = len(pu_values)
+		print(f"Identified {unique_pus} PU value(s)", file=sys.stderr)
+
 	count = 0
-	with pysam.AlignmentFile(in_path, "rb", check_sq=False) as inh:
-		header_obj = inh.header
-		if hasattr(header_obj, 'to_dict'):
-			header_dict = header_obj.to_dict()
-		else:
-			header_dict = dict(header_obj)
+	# Second pass: rewrite alignments with the enriched header and tags.
+	with pysam.AlignmentFile(in_path, "rb", check_sq=False) as inh, pysam.AlignmentFile(out_path, "wb", header=header_dict) as outh:
+		for aln in inh.fetch(until_eof=True):
+			qname = aln.query_name or ''
+			pu = derive_pu_from_qname(qname)
+			rg_id = pu_to_rg.get(pu)
+			if rg_id:
+				aln.set_tag('RG', rg_id, value_type='Z')
 
-		stream = inh.fetch(until_eof=True)
-		first_aln = next(stream, None)
+			zm = extract_zm_from_qname(qname)
+			if zm is not None:
+				aln.set_tag('zm', zm, value_type='i')
+			else:
+				aln.set_tag('zm', count, value_type='i')
 
-		pu = 'unknown'
-		if first_aln is not None:
-			qn = first_aln.query_name or ''
-			pu = qn.split('/', 1)[0] if '/' in qn else qn
-
-		header_dict = prepare_header(header_dict, pu)
-
-		with pysam.AlignmentFile(out_path, "wb", header=header_dict) as outh:
-			if first_aln is not None:
-				qname = first_aln.query_name
-				zm = extract_zm_from_qname(qname)
-				if zm is not None:
-					first_aln.set_tag('zm', zm, value_type='i')
-				else:
-					first_aln.set_tag('zm', count, value_type='i')
-				outh.write(first_aln)
-				count += 1
-
-			for aln in stream:
-				qname = aln.query_name
-				zm = extract_zm_from_qname(qname)
-				if zm is not None:
-					aln.set_tag('zm', zm, value_type='i')
-				else:
-					aln.set_tag('zm', count, value_type='i')
-				outh.write(aln)
-				count += 1
-				if args.verbose and count % 100000 == 0:
-					print(f"Processed {count} reads...", file=sys.stderr)
+			outh.write(aln)
+			count += 1
+			if args.verbose and count % 100000 == 0:
+				print(f"Processed {count} reads...", file=sys.stderr)
 
 	if args.verbose:
 		print(f"Finished: wrote {out_path} ({count} reads)")
