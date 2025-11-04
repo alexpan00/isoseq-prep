@@ -93,17 +93,16 @@ def prepare_header(header_dict, pu_values):
 			rg['DS'] = f"{ds_value}{separator}READTYPE=CCS" if ds_value else 'READTYPE=CCS'
 		rg['SM'] = pu_value
 
-	if len(pu_values) > len(rg_list):
-		while pu_values:
-			pu = pu_values.pop()
-			rg_id = f"RG{next_index}"
-			while rg_id in used_ids:
-				next_index += 1
-				rg_id = f"RG{next_index}"
-			rg_list.append({'ID': rg_id, 'SM':pu, 'PU': pu, 'DS': 'READTYPE=CCS'})
-			pu_to_rg[pu] = rg_id
-			used_ids.add(rg_id)
+	while pu_values:
+		pu = pu_values.pop()
+		rg_id = f"RG{next_index}"
+		while rg_id in used_ids:
 			next_index += 1
+			rg_id = f"RG{next_index}"
+		rg_list.append({'ID': rg_id, 'SM':pu, 'PU': pu, 'DS': 'READTYPE=CCS'})
+		pu_to_rg[pu] = rg_id
+		used_ids.add(rg_id)
+		next_index += 1
 
 	header_dict['RG'] = rg_list
 	return header_dict, pu_to_rg
