@@ -8,6 +8,9 @@ import argparse
 import os
 import re
 import sys
+import shutil
+import subprocess
+import tempfile
 
 
 def parse_args():
@@ -61,6 +64,36 @@ def collect_header_and_pus(in_path):
 			pu = derive_pu_from_qname(aln.query_name)
 			pu_values.add(pu)
 	return header_dict, pu_values
+
+
+def ensure_bam_input(in_path, verbose=False):
+	"""Return a BAM path, converting FASTQ inputs via samtools import when needed."""
+	if in_path.lower().endswith('.bam'):
+		return in_path, None
+
+	if shutil.which('samtools') is None:
+		print("Error: samtools executable not found in PATH; required to convert FASTQ inputs.", file=sys.stderr)
+		sys.exit(1)
+
+	tmp_fd, tmp_path = tempfile.mkstemp(prefix="add_zm_", suffix=".bam")
+	os.close(tmp_fd)
+	cmd = [
+		'samtools',
+		'import',
+		'-o', tmp_path,
+		in_path,
+	]
+	if verbose:
+		print(f"Converting FASTQ to BAM via: {' '.join(cmd)}", file=sys.stderr)
+	try:
+		subprocess.run(cmd, check=True)
+	except subprocess.CalledProcessError as exc:
+		print(f"Error: samtools import failed with exit code {exc.returncode}.", file=sys.stderr)
+		if os.path.exists(tmp_path):
+			os.remove(tmp_path)
+		sys.exit(1)
+
+	return tmp_path, tmp_path
 
 
 def prepare_header(header_dict: dict, pu_values: set) -> tuple[dict, dict]:
@@ -127,35 +160,45 @@ def main():
 	if os.path.exists(out_path) and not args.force:
 		print(f"Error: output file '{out_path}' already exists. Use --force to overwrite.", file=sys.stderr)
 		sys.exit(1)
+	if os.path.exists(out_path) and args.force:
+		os.remove(out_path)
 
-	# First pass: collect header and PU values
-	header_dict, pu_values = collect_header_and_pus(in_path)
-	header_dict, pu_to_rg = prepare_header(header_dict, pu_values)
+	converted_path = None
+	try:
+		bam_path, converted_path = ensure_bam_input(in_path, verbose=args.verbose)
 
-	if args.verbose and pu_values:
-		unique_pus = len(pu_values)
-		print(f"Identified {unique_pus} PU value(s)", file=sys.stderr)
+		# First pass: collect header and PU values
+		header_dict, pu_values = collect_header_and_pus(bam_path)
+		header_dict, pu_to_rg = prepare_header(header_dict, pu_values)
 
-	count = 0
-	# Second pass: rewrite alignments with the enriched header and tags.
-	with pysam.AlignmentFile(in_path, "rb", check_sq=False) as inh, pysam.AlignmentFile(out_path, "wb", header=header_dict) as outh:
-		for aln in inh.fetch(until_eof=True):
-			qname = aln.query_name or ''
-			pu = derive_pu_from_qname(qname)
-			rg_id = pu_to_rg.get(pu)
-			if rg_id:
-				aln.set_tag('RG', rg_id, value_type='Z')
+		if args.verbose and pu_values:
+			unique_pus = len(pu_values)
+			print(f"Identified {unique_pus} PU value(s)", file=sys.stderr)
 
-			zm = extract_zm_from_qname(qname)
-			if zm is not None:
-				aln.set_tag('zm', zm, value_type='i')
-			else:
-				aln.set_tag('zm', count, value_type='i')
+		count = 0
+		# Second pass: rewrite alignments with the enriched header and tags.
+		with pysam.AlignmentFile(bam_path, "rb", check_sq=False) as inh, pysam.AlignmentFile(out_path, "wb", header=header_dict) as outh:
+			for aln in inh.fetch(until_eof=True):
+				qname = aln.query_name or ''
+				pu = derive_pu_from_qname(qname)
+				rg_id = pu_to_rg.get(pu)
+				if rg_id:
+					aln.set_tag('RG', rg_id, value_type='Z')
 
-			outh.write(aln)
-			count += 1
-			if args.verbose and count % 100000 == 0:
-				print(f"Processed {count} reads...", file=sys.stderr)
+				zm = extract_zm_from_qname(qname)
+				if zm is not None:
+					aln.set_tag('zm', zm, value_type='i')
+				else:
+					aln.set_tag('zm', count, value_type='i')
+
+				outh.write(aln)
+				count += 1
+				if args.verbose and count % 100000 == 0:
+					print(f"Processed {count} reads...", file=sys.stderr)
+
+	finally:
+		if converted_path and os.path.exists(converted_path):
+			os.remove(converted_path)
 
 	if args.verbose:
 		print(f"Finished: wrote {out_path} ({count} reads)")

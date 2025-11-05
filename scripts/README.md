@@ -38,6 +38,41 @@ Currently included scripts
       correct heuristic for your data, consider adjusting the script or
       providing a constant PU and/or mapping logic.
 
+- `add_bx_tag.py`
+  - Purpose: Add or replace a per-read `bx` array tag (`bx:B:i,<len1>,<len2>`) on every
+    alignment. Defaults to barcode length values 40 and 39, with CLI flags to
+    override them.
+
+  - Usage examples:
+
+    ```bash
+    # add default bx lengths
+    python scripts/add_bx_tag.py input.bam
+
+    # customize lengths and overwrite existing output
+    python scripts/add_bx_tag.py input.bam --bc1-len 42 --bc2-len 38 -o with_bx.bam --force
+    ```
+
+  - Notes & dependencies:
+    - Requires `pysam`.
+    - Does not modify header contents; only per-read tags are updated.
+
+- `build_primers_fasta.py`
+  - Purpose: Parse FL BAM headers to reconstruct a multiplex primer FASTA.
+    Extracts barcode counts, primer indices, and sequences from read-group
+    fields, fills missing indices with 25 `N`s, and writes a combined FASTA.
+
+  - Usage example:
+
+    ```bash
+    python scripts/build_primers_fasta.py fl1.bam fl2.bam -o primers.fasta
+    ```
+
+  - Notes & dependencies:
+    - Requires `pysam` to read BAM headers.
+    - Validates that all inputs agree on `BarcodeCount` and do not reuse primer
+      indices with conflicting sequences.
+
 - `infer_adapters.py`
   - Purpose: Sample reads from a BAM or FASTQ file, detect polyA/polyT signals,
     and infer Iso-Seq adapter or multiplexed primer cores. With the
