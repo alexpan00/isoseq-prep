@@ -7,5 +7,6 @@ dependencies:
   - python=3.11
   - pysam
   - samtools
+  - edlib
   - pytest
   - pip

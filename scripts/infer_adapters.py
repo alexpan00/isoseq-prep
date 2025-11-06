@@ -20,7 +20,7 @@ import argparse
 import gzip
 import os
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple
 
@@ -28,6 +28,11 @@ try:
     import pysam
 except Exception:  # pragma: no cover - optional dependency
     pysam = None
+
+try:
+    import edlib  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    edlib = None
 
 MERGE_GAP = 1
 N_THRESHOLD = 0.1
@@ -282,6 +287,96 @@ def build_consensus(
     return _build_weighted_consensus(seq_counts, min_support_frac, n_threshold, align)
 
 
+def collapse_barcodes(
+    barcode_counts: Counter[str],
+    *,
+    top_n: int = 15,
+    selected_target_fraction: float = 0.9,
+    min_candidate_fraction: float = 0.005,
+) -> Counter[str]:
+    """Collapse shorter/noisier barcodes onto high-confidence representatives.
+
+    The heuristic follows the user-specified procedure: determine the dominant
+    barcode length from the top ``top_n`` sequences, keep those as anchors, and
+    iteratively absorb other barcodes whose nearest anchor (by edit distance)
+    is unique while either overall anchor coverage remains below
+    ``selected_target_fraction`` or the candidate itself exceeds
+    ``min_candidate_fraction`` of observations.
+    """
+
+    if not barcode_counts:
+        return barcode_counts
+    if edlib is None:
+        raise RuntimeError(
+            "edlib is required for barcode collapsing; install edlib (e.g. pip install edlib)."
+        )
+
+    total = sum(barcode_counts.values())
+    if total == 0:
+        return barcode_counts
+
+    top_items = barcode_counts.most_common(top_n)
+    if not top_items:
+        return barcode_counts
+
+    length_scores: defaultdict[int, int] = defaultdict(int)
+    for barcode, count in top_items:
+        length_scores[len(barcode)] += count
+
+    if not length_scores:
+        return barcode_counts
+
+    # Prefer the most supported length; break ties in favour of longer barcodes.
+    target_length = max(length_scores.items(), key=lambda kv: (kv[1], kv[0]))[0]
+
+    anchors = [barcode for barcode, _ in top_items if len(barcode) == target_length]
+    if not anchors:
+        anchors = [barcode for barcode, _ in top_items]
+
+    anchors_set = set(anchors)
+    result = Counter()
+    selected_total = 0
+    for barcode in anchors:
+        count = barcode_counts[barcode]
+        result[barcode] += count
+        selected_total += count
+
+    # Process remaining barcodes from most to least abundant.
+    for barcode, count in barcode_counts.most_common():
+        if barcode in anchors_set:
+            continue
+
+        candidate_fraction = count / total
+        distances = []
+        for anchor in anchors:
+            alignment = edlib.align(barcode, anchor, mode="NW", task="distance")
+            dist = alignment.get("editDistance")
+            if dist == -1:
+                continue
+            distances.append((dist, anchor))
+
+        if not distances:
+            result[barcode] += count
+            continue
+
+        distances.sort(key=lambda pair: (pair[0], pair[1]))
+        min_dist, best_anchor = distances[0]
+
+        # Require a unique best anchor (no ties on distance).
+        if len(distances) > 1 and distances[0][0] == distances[1][0]:
+            result[barcode] += count
+            continue
+
+        selected_fraction = selected_total / total if total else 0.0
+        if selected_fraction < selected_target_fraction or candidate_fraction > min_candidate_fraction:
+            result[best_anchor] += count
+            selected_total += count
+        else:
+            result[barcode] += count
+
+    return result
+
+
 def compute_core_and_barcodes(
     counter: Counter[str],
     orientation: str,
@@ -334,6 +429,8 @@ def compute_core_and_barcodes(
                 barcode = seq[core_len:]
 
             barcode_counts[barcode] += weight
+
+        barcode_counts = collapse_barcodes(barcode_counts)
     return core, barcode_counts
 
 
