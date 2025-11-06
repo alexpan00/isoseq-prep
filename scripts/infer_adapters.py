@@ -9,6 +9,7 @@ multiplexed primers where several barcodes share a common primer core. It:
 * aggregates both 3' (downstream of polyA) and 5' (upstream of polyT) segments
 * computes weighted consensus sequences for the shared primer core
 * reports barcode sequences (prefix/suffix surrounding the core) with counts
+* optionally renders a knee plot summarising barcode frequency distributions
 
 The goal is to distinguish the common primer portion from barcode-specific
 sequence, supporting cases where one or both ends are multiplexed.
@@ -20,8 +21,10 @@ import argparse
 import gzip
 import os
 import re
+import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from itertools import accumulate
 from typing import Iterable, List, Optional, Tuple
 
 try:
@@ -33,6 +36,11 @@ try:
     import edlib  # type: ignore
 except Exception:  # pragma: no cover - optional dependency
     edlib = None
+
+try:
+    import matplotlib.pyplot as plt  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    plt = None
 
 MERGE_GAP = 1
 N_THRESHOLD = 0.1
@@ -97,6 +105,19 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=20,
         help="Report at most this many barcode sequences per end (default: 20)",
+    )
+    parser.add_argument(
+        "--plot-prefix",
+        default=None,
+        help=(
+            "Base filename (without extension) for the barcode knee plot. "
+            "Defaults to <input_basename>_primer_knee.png if omitted."
+        ),
+    )
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="Enable barcode knee plot generation.",
     )
     parser.add_argument(
         "--verbose",
@@ -491,6 +512,71 @@ def show_primer_results(results: dict, args: argparse.Namespace) -> None:
     PrimerStats(five.get("core", ""), five.get("barcodes", Counter())).report("5'", args.top)
 
 
+def save_knee_plot(results: dict, args: argparse.Namespace) -> None:
+    """Render a barcode knee plot if data and dependencies are available."""
+
+    series = []
+    for label in ("3p", "5p"):
+        barcodes: Counter[str] = results.get(label, {}).get("barcodes", Counter())
+        if barcodes:
+            counts = sorted(barcodes.values(), reverse=True)
+            if counts:
+                ranks = list(range(1, len(counts) + 1))
+                cumulative = list(accumulate(counts))
+                total = cumulative[-1]
+                cumulative = [value / total for value in cumulative]
+                series.append((label, ranks, counts, cumulative))
+
+    if not series:
+        print("No barcode counts available for knee plot.", file=sys.stderr)
+        return
+
+    prefix = args.plot_prefix
+    if not prefix:
+        stem = os.path.splitext(os.path.basename(args.input))[0] or "primer"
+        prefix = f"{stem}_primer_knee"
+    output_path = prefix if prefix.endswith(".png") else f"{prefix}.png"
+
+    fig, ax_counts = plt.subplots()
+    ax_cum = ax_counts.twinx()
+
+    count_lines = []
+    cumulative_lines = []
+    for label, ranks, counts, cumulative in series:
+        marker = "o" if len(ranks) <= 20 else None
+        (count_line,) = ax_counts.plot(ranks, counts, marker=marker, label=f"{label} counts")
+        (cum_line,) = ax_cum.plot(
+            ranks,
+            cumulative,
+            linestyle="--",
+            color=count_line.get_color(),
+            label=f"{label} cumulative",
+        )
+        count_lines.append(count_line)
+        cumulative_lines.append(cum_line)
+
+    ax_counts.set_xscale("log")
+    ax_counts.set_yscale("log")
+    ax_counts.set_xlim(1, max(max(ranks) for _, ranks, _, _ in series))
+    ax_counts.set_xlabel("Barcode rank (log scale)")
+    ax_counts.set_ylabel("Barcode counts (log scale)")
+    ax_counts.grid(True, which="both", alpha=0.3)
+
+    ax_cum.set_ylim(0, 1.05)
+    ax_cum.set_ylabel("Cumulative fraction of counts")
+    ax_cum.axhline(0.9, color="grey", linestyle=":", linewidth=1, alpha=0.7)
+
+    lines = count_lines + cumulative_lines
+    labels = [line.get_label() for line in lines]
+    ax_counts.legend(lines, labels, loc="best")
+    ax_counts.set_title("Primer barcode knee plot")
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    print(f"Knee plot saved to {output_path}")
+
+
 def main() -> None:
     args = parse_args()
 
@@ -562,6 +648,8 @@ def main() -> None:
     else:
         primers_res = analyze_primers(adapter_counts, five_prime_counts, args)
         show_primer_results(primers_res, args)
+        if args.plot:
+            save_knee_plot(primers_res, args)
 
 if __name__ == "__main__":
     main()

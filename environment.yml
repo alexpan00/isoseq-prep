@@ -8,5 +8,6 @@ dependencies:
   - pysam
   - samtools
   - edlib
+  - matplotlib
   - pytest
   - pip
