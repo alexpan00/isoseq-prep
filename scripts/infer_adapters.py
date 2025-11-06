@@ -468,6 +468,27 @@ def adjust_knee_for_empty(
     return knee_rank, knee_fraction
 
 
+def resolve_output_path(
+    input_path: str,
+    prefix: Optional[str],
+    *,
+    default_suffix: str,
+    default_extension: str,
+    allowed_extensions: Tuple[str, ...],
+) -> str:
+    """Build an output path using an optional prefix and sensible default stem."""
+
+    if prefix:
+        base = prefix
+    else:
+        stem = os.path.splitext(os.path.basename(input_path))[0] or "primer"
+        base = f"{stem}_{default_suffix}"
+
+    if base.lower().endswith(allowed_extensions):
+        return base
+    return f"{base}{default_extension}"
+
+
 def compute_core_and_barcodes(
     counter: Counter[str],
     orientation: str,
@@ -560,46 +581,47 @@ class PrimerStats:
 def analyze_primers(
     three_prime_counts: Counter[str],
     five_prime_counts: Counter[str],
-    args: argparse.Namespace,
+    *,
+    min_support: float,
+    n_threshold: float,
+    multiplexed: bool,
 ) -> dict:
-    """
-    Compute primer cores and barcode counts for 3' and 5' ends and return
-    a dictionary with the results. This function does not perform any
-    printing; use `show_primer_results` to display the returned data.
-    """
-    
-    # extract core sequences and barcode counts (only necesary if multiplexed)
+    """Compute primer summaries, optionally inferring barcode knees."""
+
     three_core, three_barcodes = compute_core_and_barcodes(
-        three_prime_counts, "3p", args.min_support, args.n_threshold, args.multiplexed
+        three_prime_counts, "3p", min_support, n_threshold, multiplexed
     )
     five_core, five_barcodes = compute_core_and_barcodes(
-        five_prime_counts, "5p", args.min_support, args.n_threshold, args.multiplexed
+        five_prime_counts, "5p", min_support, n_threshold, multiplexed
     )
-    
-    # compute knee points if multiplexed. This is done to recommend
-    # how many barcodes to output in FASTA files
-    if args.multiplexed:
+
+    # find the number of barcodes to report based on knee point only if multiplexed
+    if multiplexed:
+        # 3' end analysis
         three_sorted = three_barcodes.most_common()
         three_counts = [count for _, count in three_sorted]
         three_cumulative = list(accumulate(three_counts)) if three_counts else []
         three_knee_rank, three_knee_fraction = find_knee_point(three_counts)
-        if three_counts:
-            three_knee_rank, three_knee_fraction = adjust_knee_for_empty(
-                three_sorted, three_cumulative, three_knee_rank
-            )
+        three_knee_rank, three_knee_fraction = adjust_knee_for_empty(
+            three_sorted, three_cumulative, three_knee_rank
+        )
 
+        # 5' end analysis
         five_sorted = five_barcodes.most_common()
         five_counts = [count for _, count in five_sorted]
         five_cumulative = list(accumulate(five_counts)) if five_counts else []
         five_knee_rank, five_knee_fraction = find_knee_point(five_counts)
-        if five_counts:
-            five_knee_rank, five_knee_fraction = adjust_knee_for_empty(
-                five_sorted, five_cumulative, five_knee_rank
-            )
+        five_knee_rank, five_knee_fraction = adjust_knee_for_empty(
+            five_sorted, five_cumulative, five_knee_rank
+        )
+
     else:
-        three_sorted = five_sorted = three_cumulative = five_cumulative = []
-        three_knee_rank = five_knee_rank = 0
-        three_knee_fraction = five_knee_fraction = 1.0
+        three_sorted = three_cumulative = []
+        three_knee_rank = 0
+        three_knee_fraction = 0.0
+        five_sorted = five_cumulative = []
+        five_knee_rank = 0
+        five_knee_fraction = 0.0
 
     return {
         "3p": {
@@ -621,7 +643,7 @@ def analyze_primers(
     }
 
 
-def show_primer_results(results: dict, args: argparse.Namespace) -> None:
+def show_primer_results(results: dict, top_n: int) -> None:
     """
     Pretty-print primer analysis results produced by `analyze_primers`.
     """
@@ -634,17 +656,17 @@ def show_primer_results(results: dict, args: argparse.Namespace) -> None:
         three.get("sorted", []),
         three.get("knee_rank", 0),
         three.get("knee_fraction", 0.0),
-    ).report("3'", args.top)
+    ).report("3'", top_n)
     PrimerStats(
         five.get("core", ""),
         five.get("barcodes", Counter()),
         five.get("sorted", []),
         five.get("knee_rank", 0),
         five.get("knee_fraction", 0.0),
-    ).report("5'", args.top)
+    ).report("5'", top_n)
 
 
-def save_knee_plot(results: dict, args: argparse.Namespace) -> None:
+def save_knee_plot(results: dict, output_path: str) -> None:
     """Render a barcode knee plot if data and dependencies are available."""
 
     if plt is None:
@@ -676,12 +698,6 @@ def save_knee_plot(results: dict, args: argparse.Namespace) -> None:
     if not series:
         print("No barcode counts available for knee plot.", file=sys.stderr)
         return
-
-    prefix = args.plot_prefix
-    if not prefix:
-        stem = os.path.splitext(os.path.basename(args.input))[0] or "primer"
-        prefix = f"{stem}_primer_knee"
-    output_path = prefix if prefix.endswith(".png") else f"{prefix}.png"
 
     fig, ax_counts = plt.subplots()
     ax_cum = ax_counts.twinx()
@@ -751,20 +767,11 @@ def save_knee_plot(results: dict, args: argparse.Namespace) -> None:
     print(f"Knee plot saved to {output_path}")
 
 
-def write_adapter_fasta(results: dict, args: argparse.Namespace) -> None:
+def write_adapter_fasta(results: dict, output_path: str) -> None:
     """Write adapter FASTA sequences up to the detected knee."""
 
-    if getattr(args, "no_fasta", False):
-        return
-
-    prefix = args.fasta_prefix
-    if not prefix:
-        stem = os.path.splitext(os.path.basename(args.input))[0] or "primer"
-        prefix = f"{stem}_primers"
-    if prefix.endswith(('.fa', '.fasta', '.fna')):
-        output_path = prefix
-    else:
-        output_path = f"{prefix}.fasta"
+    if not output_path:
+        raise ValueError("output_path must be provided for FASTA export")
 
     entries: List[Tuple[str, str]] = []
 
@@ -881,12 +888,34 @@ def main() -> None:
         print("No primer candidates detected downstream the polyA")
         print("EXITING.")
     else:
-        primers_res = analyze_primers(adapter_counts, five_prime_counts, args)
-        show_primer_results(primers_res, args)
+        primers_res = analyze_primers(
+            adapter_counts,
+            five_prime_counts,
+            min_support=args.min_support,
+            n_threshold=args.n_threshold,
+            multiplexed=args.multiplexed,
+        )
+        show_primer_results(primers_res, args.top)
+
         if args.plot and args.multiplexed:
-            save_knee_plot(primers_res, args)
+            plot_path = resolve_output_path(
+                args.input,
+                args.plot_prefix,
+                default_suffix="primer_knee",
+                default_extension=".png",
+                allowed_extensions=(".png",),
+            )
+            save_knee_plot(primers_res, plot_path)
+
         if not args.no_fasta:
-            write_adapter_fasta(primers_res, args)
+            fasta_path = resolve_output_path(
+                args.input,
+                args.fasta_prefix,
+                default_suffix="primers",
+                default_extension=".fasta",
+                allowed_extensions=(".fa", ".fasta", ".fna"),
+            )
+            write_adapter_fasta(primers_res, fasta_path)
 
 if __name__ == "__main__":
     main()
