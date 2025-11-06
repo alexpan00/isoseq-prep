@@ -10,6 +10,7 @@ multiplexed primers where several barcodes share a common primer core. It:
 * computes weighted consensus sequences for the shared primer core
 * reports barcode sequences (prefix/suffix surrounding the core) with counts
 * optionally renders a knee plot summarising barcode frequency distributions
+* automatically detects the knee to recommend adapter counts and FASTA output
 
 The goal is to distinguish the common primer portion from barcode-specific
 sequence, supporting cases where one or both ends are multiplexed.
@@ -25,7 +26,7 @@ import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from itertools import accumulate
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 try:
     import pysam
@@ -118,6 +119,19 @@ def parse_args() -> argparse.Namespace:
         "--plot",
         action="store_true",
         help="Enable barcode knee plot generation.",
+    )
+    parser.add_argument(
+        "--no-fasta",
+        action="store_true",
+        help="Disable writing adapter FASTA sequences.",
+    )
+    parser.add_argument(
+        "--fasta-prefix",
+        default=None,
+        help=(
+            "Base filename for FASTA output. Defaults to <input_basename>_primers.fasta "
+            "if omitted."
+        ),
     )
     parser.add_argument(
         "--verbose",
@@ -398,6 +412,62 @@ def collapse_barcodes(
     return result
 
 
+def find_knee_point(counts: Sequence[int]) -> Tuple[int, float]:
+    """Identify the knee point using a simple Kneedle-style heuristic.
+
+    Returns the rank (1-based) of the knee and the cumulative fraction covered
+    by adapters up to that knee. If no counts are provided, returns (0, 0.0).
+    """
+
+    if not counts:
+        return 0, 0.0
+
+    total = sum(counts)
+    if total == 0:
+        return 0, 0.0
+
+    if len(counts) == 1:
+        return 1, 1.0
+
+    cumulative = list(accumulate(counts))
+    n = len(counts)
+    diffs = []
+    for idx, cum in enumerate(cumulative):
+        x_norm = idx / (n - 1)
+        y_norm = cum / total
+        diffs.append(y_norm - x_norm)
+
+    knee_idx = max(range(n), key=lambda i: diffs[i])
+    if diffs[knee_idx] <= 0:
+        knee_idx = 0
+
+    knee_rank = knee_idx + 1
+    knee_fraction = cumulative[knee_idx] / total
+    return knee_rank, knee_fraction
+
+
+def adjust_knee_for_empty(
+    sorted_counts: Sequence[Tuple[str, int]],
+    cumulative: Sequence[int],
+    knee_rank: int,
+) -> Tuple[int, float]:
+    """Nudge the knee rank left if it selects an empty adapter ("" barcode)."""
+
+    if not sorted_counts or knee_rank <= 0:
+        return 0, 0.0
+
+    knee_rank = min(knee_rank, len(sorted_counts))
+    total = cumulative[-1] if cumulative else 0
+    if total == 0:
+        return 0, 0.0
+
+    while knee_rank > 1 and sorted_counts[knee_rank - 1][0] == "":
+        knee_rank -= 1
+
+    knee_fraction = cumulative[knee_rank - 1] / total
+    return knee_rank, knee_fraction
+
+
 def compute_core_and_barcodes(
     counter: Counter[str],
     orientation: str,
@@ -417,7 +487,8 @@ def compute_core_and_barcodes(
         multiplexed (bool): whether the data is multiplexed
 
     Returns:
-        Tuple[str, Counter[str]]: core primer sequence and barcode counts
+        Tuple[str, Counter[str]]: core primer sequence and barcode counts, if not
+            multiplexed the second element is empty
     '''
     if not counter:
         return "", Counter()
@@ -459,6 +530,9 @@ def compute_core_and_barcodes(
 class PrimerStats:
     core: str
     barcode_counts: Counter[str]
+    sorted_barcodes: List[Tuple[str, int]]
+    knee_rank: int = 0
+    knee_fraction: float = 0.0
 
     def report(self, label: str, limit: int) -> None:
         print(f"\n{label} primer core length: {len(self.core)}")
@@ -471,10 +545,15 @@ class PrimerStats:
             print(f"No barcode diversity detected for {label.lower()} primer.")
             return
         total = sum(self.barcode_counts.values())
+        if self.knee_rank > 0 and total > 0:
+            print(
+                f"Knee suggests {self.knee_rank} barcodes covering {self.knee_fraction:.2%} of reads."
+            )
+        barcodes_iter = self.sorted_barcodes if self.sorted_barcodes else self.barcode_counts.most_common()
         print(f"Top barcodes for {label.lower()} primer (n={total} observations):")
-        for barcode, count in self.barcode_counts.most_common(limit):
+        for barcode, count in barcodes_iter[:limit]:
             name = barcode if barcode else "<none>"
-            frac = count / total
+            frac = count / total if total else 0.0
             print(f"  {name}\t{count}\t{frac:.2%}")
 
 
@@ -488,16 +567,57 @@ def analyze_primers(
     a dictionary with the results. This function does not perform any
     printing; use `show_primer_results` to display the returned data.
     """
+    
+    # extract core sequences and barcode counts (only necesary if multiplexed)
     three_core, three_barcodes = compute_core_and_barcodes(
         three_prime_counts, "3p", args.min_support, args.n_threshold, args.multiplexed
     )
     five_core, five_barcodes = compute_core_and_barcodes(
         five_prime_counts, "5p", args.min_support, args.n_threshold, args.multiplexed
     )
+    
+    # compute knee points if multiplexed. This is done to recommend
+    # how many barcodes to output in FASTA files
+    if args.multiplexed:
+        three_sorted = three_barcodes.most_common()
+        three_counts = [count for _, count in three_sorted]
+        three_cumulative = list(accumulate(three_counts)) if three_counts else []
+        three_knee_rank, three_knee_fraction = find_knee_point(three_counts)
+        if three_counts:
+            three_knee_rank, three_knee_fraction = adjust_knee_for_empty(
+                three_sorted, three_cumulative, three_knee_rank
+            )
+
+        five_sorted = five_barcodes.most_common()
+        five_counts = [count for _, count in five_sorted]
+        five_cumulative = list(accumulate(five_counts)) if five_counts else []
+        five_knee_rank, five_knee_fraction = find_knee_point(five_counts)
+        if five_counts:
+            five_knee_rank, five_knee_fraction = adjust_knee_for_empty(
+                five_sorted, five_cumulative, five_knee_rank
+            )
+    else:
+        three_sorted = five_sorted = three_cumulative = five_cumulative = []
+        three_knee_rank = five_knee_rank = 0
+        three_knee_fraction = five_knee_fraction = 1.0
 
     return {
-        "3p": {"core": three_core, "barcodes": three_barcodes},
-        "5p": {"core": five_core, "barcodes": five_barcodes},
+        "3p": {
+            "core": three_core,
+            "barcodes": three_barcodes,
+            "sorted": three_sorted,
+            "knee_rank": three_knee_rank,
+            "knee_fraction": three_knee_fraction,
+            "total": three_cumulative[-1] if three_cumulative else 0,
+        },
+        "5p": {
+            "core": five_core,
+            "barcodes": five_barcodes,
+            "sorted": five_sorted,
+            "knee_rank": five_knee_rank,
+            "knee_fraction": five_knee_fraction,
+            "total": five_cumulative[-1] if five_cumulative else 0,
+        },
     }
 
 
@@ -508,24 +628,50 @@ def show_primer_results(results: dict, args: argparse.Namespace) -> None:
     three = results.get("3p", {})
     five = results.get("5p", {})
 
-    PrimerStats(three.get("core", ""), three.get("barcodes", Counter())).report("3'", args.top)
-    PrimerStats(five.get("core", ""), five.get("barcodes", Counter())).report("5'", args.top)
+    PrimerStats(
+        three.get("core", ""),
+        three.get("barcodes", Counter()),
+        three.get("sorted", []),
+        three.get("knee_rank", 0),
+        three.get("knee_fraction", 0.0),
+    ).report("3'", args.top)
+    PrimerStats(
+        five.get("core", ""),
+        five.get("barcodes", Counter()),
+        five.get("sorted", []),
+        five.get("knee_rank", 0),
+        five.get("knee_fraction", 0.0),
+    ).report("5'", args.top)
 
 
 def save_knee_plot(results: dict, args: argparse.Namespace) -> None:
     """Render a barcode knee plot if data and dependencies are available."""
 
+    if plt is None:
+        print("matplotlib is not available; skipping barcode knee plot.", file=sys.stderr)
+        return
+
     series = []
     for label in ("3p", "5p"):
-        barcodes: Counter[str] = results.get(label, {}).get("barcodes", Counter())
-        if barcodes:
-            counts = sorted(barcodes.values(), reverse=True)
-            if counts:
-                ranks = list(range(1, len(counts) + 1))
-                cumulative = list(accumulate(counts))
-                total = cumulative[-1]
-                cumulative = [value / total for value in cumulative]
-                series.append((label, ranks, counts, cumulative))
+        data = results.get(label, {})
+        sorted_counts: List[Tuple[str, int]] = data.get("sorted", []) or []
+        if not sorted_counts:
+            continue
+        counts = [count for _, count in sorted_counts]
+        ranks = list(range(1, len(counts) + 1))
+        cumulative_raw = list(accumulate(counts))
+        total = cumulative_raw[-1]
+        cumulative = [value / total for value in cumulative_raw]
+        series.append(
+            {
+                "label": label,
+                "ranks": ranks,
+                "counts": counts,
+                "cumulative": cumulative,
+                "knee_rank": data.get("knee_rank", 0),
+                "knee_fraction": data.get("knee_fraction", 0.0),
+            }
+        )
 
     if not series:
         print("No barcode counts available for knee plot.", file=sys.stderr)
@@ -542,7 +688,12 @@ def save_knee_plot(results: dict, args: argparse.Namespace) -> None:
 
     count_lines = []
     cumulative_lines = []
-    for label, ranks, counts, cumulative in series:
+    for entry in series:
+        label = entry["label"]
+        ranks = entry["ranks"]
+        counts = entry["counts"]
+        cumulative = entry["cumulative"]
+        knee_rank = entry["knee_rank"]
         marker = "o" if len(ranks) <= 20 else None
         (count_line,) = ax_counts.plot(ranks, counts, marker=marker, label=f"{label} counts")
         (cum_line,) = ax_cum.plot(
@@ -555,9 +706,25 @@ def save_knee_plot(results: dict, args: argparse.Namespace) -> None:
         count_lines.append(count_line)
         cumulative_lines.append(cum_line)
 
+        if knee_rank and 1 <= knee_rank <= len(ranks):
+            ax_counts.axvline(
+                knee_rank,
+                color=count_line.get_color(),
+                linestyle=":",
+                linewidth=1,
+                alpha=0.7,
+            )
+            ax_cum.scatter(
+                [knee_rank],
+                [cumulative[knee_rank - 1]],
+                color=count_line.get_color(),
+                marker="x",
+                zorder=5,
+            )
+
     ax_counts.set_xscale("log")
     ax_counts.set_yscale("log")
-    ax_counts.set_xlim(1, max(max(ranks) for _, ranks, _, _ in series))
+    ax_counts.set_xlim(1, max(max(entry["ranks"]) for entry in series))
     ax_counts.set_xlabel("Barcode rank (log scale)")
     ax_counts.set_ylabel("Barcode counts (log scale)")
     ax_counts.grid(True, which="both", alpha=0.3)
@@ -568,13 +735,81 @@ def save_knee_plot(results: dict, args: argparse.Namespace) -> None:
 
     lines = count_lines + cumulative_lines
     labels = [line.get_label() for line in lines]
-    ax_counts.legend(lines, labels, loc="best")
+    ax_counts.legend(
+        lines,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.2),
+        ncol=2,
+        frameon=False,
+    )
     ax_counts.set_title("Primer barcode knee plot")
 
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
     print(f"Knee plot saved to {output_path}")
+
+
+def write_adapter_fasta(results: dict, args: argparse.Namespace) -> None:
+    """Write adapter FASTA sequences up to the detected knee."""
+
+    if getattr(args, "no_fasta", False):
+        return
+
+    prefix = args.fasta_prefix
+    if not prefix:
+        stem = os.path.splitext(os.path.basename(args.input))[0] or "primer"
+        prefix = f"{stem}_primers"
+    if prefix.endswith(('.fa', '.fasta', '.fna')):
+        output_path = prefix
+    else:
+        output_path = f"{prefix}.fasta"
+
+    entries: List[Tuple[str, str]] = []
+
+    for label in ("5p", "3p"):
+        data = results.get(label, {})
+        core = data.get("core", "")
+        if not core:
+            continue
+        sorted_counts: List[Tuple[str, int]] = data.get("sorted", []) or []
+        total = data.get("total", 0) or sum(count for _, count in sorted_counts)
+
+        if not sorted_counts:
+            header = f">{label}_adapter_core"
+            sequence = core
+            entries.append((header, sequence))
+            continue
+
+        knee_rank = data.get("knee_rank", len(sorted_counts)) or len(sorted_counts)
+        knee_rank = max(1, min(len(sorted_counts), knee_rank))
+
+        cumulative = 0
+        for idx, (barcode, count) in enumerate(sorted_counts[:knee_rank], 1):
+            barcode_seq = barcode or ""
+            if label == "5p":
+                sequence = barcode_seq + core
+            else:
+                sequence = core + barcode_seq
+            cumulative += count
+            frac = count / total if total else 0.0
+            cum_frac = cumulative / total if total else 0.0
+            header = (
+                f">{label}_adapter_{idx}|count={count}|freq={frac:.4f}|cum={cum_frac:.4f}"
+            )
+            entries.append((header, sequence))
+
+    if not entries:
+        print("No adapter sequences available for FASTA output.", file=sys.stderr)
+        return
+
+    with open(output_path, "w", encoding="ascii") as fh:
+        for header, sequence in entries:
+            fh.write(header + "\n")
+            fh.write(sequence + "\n")
+
+    print(f"Adapter FASTA saved to {output_path}")
 
 
 def main() -> None:
@@ -648,8 +883,10 @@ def main() -> None:
     else:
         primers_res = analyze_primers(adapter_counts, five_prime_counts, args)
         show_primer_results(primers_res, args)
-        if args.plot:
+        if args.plot and args.multiplexed:
             save_knee_plot(primers_res, args)
+        if not args.no_fasta:
+            write_adapter_fasta(primers_res, args)
 
 if __name__ == "__main__":
     main()

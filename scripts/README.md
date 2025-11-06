@@ -57,7 +57,7 @@ Currently included scripts
     - Requires `pysam`.
     - Does not modify header contents; only per-read tags are updated.
 
-- `build_primers_fasta.py`
+- `build_adapters_fasta.py`
   - Purpose: Parse FL BAM headers to reconstruct a multiplex primer FASTA.
     Extracts barcode counts, primer indices, and sequences from read-group
     fields, fills missing indices with 25 `N`s, and writes a combined FASTA.
