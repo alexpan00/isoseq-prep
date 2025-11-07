@@ -97,3 +97,40 @@ Currently included scripts
     - When multiplex mode is disabled, barcode reporting is skipped and only
       primer cores are emitted.
 
+- `inspect_adapters.py`
+  - Purpose: Highlight residual primer sequences and polyA/polyT stretches in
+    individual reads pulled from a BAM file. Useful for visually verifying
+    adapter trimming or spotting concatemers.
+
+  - Usage example:
+
+    ```bash
+    python scripts/inspect_adapters.py --bam mybam.bam --max-reads 5
+    ```
+
+  - Notes & dependencies:
+    - Requires `pysam` to stream reads and `edlib` for approximate matching.
+    - Emits ANSI-colored output in the terminal; set a wider `--wrap-width`
+      to inspect long reads.
+    - Primer FASTA entries are automatically augmented with reverse
+      complements before matching.
+
+- `infer_adapters_from_concatemers.py`
+  - Purpose: Recover the shared primer core that persists in concatemer reads by
+    scanning for terminal polyA/polyT boundaries, extracting the flanking
+    adapter sequence, and building a weighted consensus.
+
+  - Usage example:
+
+    ```bash
+    python scripts/infer_adapters_from_concatemers.py mybam.bam --sample 500000
+    ```
+
+  - Notes & dependencies:
+    - Accepts BAM (requires `pysam`) or FASTQ input to supply reads.
+    - Consensus heuristics are configurable via flags such as `--min-support`
+      and `--n-threshold`.
+    - Writes a two-entry FASTA containing the inferred 5' and 3' primer cores
+      unless `--no-fasta` is provided.
+    - Concatemer reads aren't really abundant so a big `--sample` is recommended
+
