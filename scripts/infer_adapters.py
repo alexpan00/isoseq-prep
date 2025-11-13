@@ -528,20 +528,29 @@ def compute_core_and_barcodes(
 
     barcode_counts: Counter[str] = Counter()
     if multiplexed:
-        core_len = len(core)
-        for seq, weight in counter.items():
-            if len(seq) < core_len:
-                continue
-            if orientation == "5p":
-                idx = seq.rfind(core[:10])
-                if idx == -1:
-                    barcode = seq[:-core_len]
+        if "N" in core:
+            idx_start = core.find("N")
+            idx_end = core.rfind("N") + 1
+            for seq, weight in counter.items():
+                if len(seq) < len(core):
+                    continue
+                barcode = seq[idx_start: idx_end]
+                barcode_counts[barcode] += weight
+        else:
+            core_len = len(core)
+            for seq, weight in counter.items():
+                if len(seq) < core_len:
+                    continue
+                if orientation == "5p":
+                    idx = seq.rfind(core[:10])
+                    if idx == -1:
+                        barcode = seq[:-core_len]
+                    else:
+                        barcode = seq[:idx]
                 else:
-                    barcode = seq[:idx]
-            else:
-                barcode = seq[core_len:]
+                    barcode = seq[core_len:]
 
-            barcode_counts[barcode] += weight
+                barcode_counts[barcode] += weight
 
         barcode_counts = collapse_barcodes(barcode_counts)
     return core, barcode_counts
@@ -796,9 +805,25 @@ def write_adapter_fasta(results: dict, output_path: str) -> None:
         for idx, (barcode, count) in enumerate(sorted_counts[:knee_rank], 1):
             barcode_seq = barcode or ""
             if label == "5p":
-                sequence = barcode_seq + core
+                if not "N" in core:
+                    sequence = barcode_seq + core
+                else:
+                    # replace N by barcode
+                    seq_list = list(core)
+                    idx_start = core.find("N")
+                    idx_end = core.rfind("N") + 1
+                    seq_list[idx_start: idx_end] = list(barcode_seq)
+                    sequence = "".join(seq_list)
             else:
-                sequence = core + barcode_seq
+                if not "N" in core:
+                    sequence = core + barcode_seq
+                else:
+                    # replace N by barcode
+                    seq_list = list(core)
+                    idx_start = core.find("N")
+                    idx_end = core.rfind("N") + 1
+                    seq_list[idx_start: idx_end] = list(barcode_seq)
+                    sequence = "".join(seq_list)
             cumulative += count
             frac = count / total if total else 0.0
             cum_frac = cumulative / total if total else 0.0
