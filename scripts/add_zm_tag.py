@@ -190,7 +190,10 @@ def main():
 					aln.set_tag('zm', zm, value_type='i')
 				else:
 					aln.set_tag('zm', count, value_type='i')
-
+				try:
+					aln.get_tag('rq')
+				except KeyError:
+					aln.set_tag('rq', 0.99, value_type='f')
 				outh.write(aln)
 				count += 1
 				if args.verbose and count % 100000 == 0:
