@@ -1,7 +1,33 @@
-'''
-Script that reads a bam file and adds the zm tag to each read based on its
-read name. The zm is the number after the first slash in the read name.
-'''
+"""Add/replace the per-read `zm` tag in a BAM and enrich related header/tags.
+
+This utility reads a BAM (or a FASTQ which it will convert to BAM using
+`samtools import`) and writes a new BAM where every alignment has a numeric
+`zm:i:<N>` tag derived from the read name. The `zm` value is taken from the
+integer immediately following the first ``/`` in the read name (for example
+``movie/12345/ccs`` -> ``zm:i:12345``). When the pattern is not present the
+script assigns a monotonically increasing integer as a fallback.
+
+Additional behavior implemented by the script:
+- Enriches the BAM header `@RG` (read-group) lines to ensure each observed
+	platform-unit (PU) is present. New `RG` records are created as needed and
+	receive `DS` metadata containing `READTYPE=CCS` to satisfy `isoseq refine`.
+- Optionally computes an `rq` tag (read quality / accuracy) from base
+	qualities with `--compute_quality` and writes it as a float tag when
+	`rq` is missing. Otherwise a default `rq` value is written (`--default-quality`).
+- Supports `--force` to overwrite existing output and `--verbose` for progress
+	messages.
+
+Dependencies and notes:
+- Requires `pysam` to read/write BAM files. If the input is FASTQ the script
+	uses the `samtools` binary to perform a temporary conversion to BAM; ensure
+	`samtools` is available in `PATH` when supplying FASTQ input.
+- The script preserves secondary/supplementary alignments behavior and writes
+	updated RG/zm/rq tags per alignment.
+
+Example:
+		python scripts/add_zm_tag.py movie.bam -o movie.zm.bam --compute_quality --verbose
+
+"""
 
 import pysam
 import argparse
@@ -12,6 +38,8 @@ import shutil
 import subprocess
 import tempfile
 
+DEFAULT_QUALITY = 0.99
+
 
 def parse_args():
 	p = argparse.ArgumentParser(
@@ -20,6 +48,8 @@ def parse_args():
 	p.add_argument("input", help="Input BAM file (indexed or unindexed)")
 	p.add_argument("-o", "--output", help="Output BAM path. If omitted, will create '<input>.zm.bam'")
 	p.add_argument("-f", "--force", action="store_true", help="Overwrite output if it exists")
+	p.add_argument("--default-quality", type=float, default=DEFAULT_QUALITY, help="Default RQ value to assign if missing (default: 0.99) or --compute_quality flag is not used")
+	p.add_argument("--compute_quality", action="store_true", help="Compute basewise accuracy from quality scores to assign rq tag if missing")
 	p.add_argument("-v", "--verbose", action="store_true", help="Print progress every 100k reads")
 	return p.parse_args()
 
@@ -151,6 +181,30 @@ def prepare_header(header_dict: dict, pu_values: set) -> tuple[dict, dict]:
 	return header_dict, pu_to_rg
 
 
+def compute_quality_metrics(aln: pysam.AlignedSegment, default_rq: float = DEFAULT_QUALITY)-> float:
+            """Return accuracy_basewise or placeholder if no quals.
+            
+            To calculate basewise accuracy from quality values we need to convert
+            the Phred scores to probabilities by using the formula:
+				P(error) = 10^(-Q/10)
+			Then we can compute accuracy as:
+            accuracy = 1 - (sum of error probabilities / length of sequence)
+            
+            Args:
+				aln: pysam AlignedSegment object
+				default_rq: default accuracy value to return if no quality scores are present
+			Returns:
+				accuracy_basewise: float
+            """
+            quals = aln.query_qualities  # list of ints, or None
+            if quals is None:
+                return default_rq
+            probs = [10 ** (-q / 10.0) for q in quals]
+            L = len(probs)
+            expected_errors = sum(probs)
+            accuracy_basewise = 1.0 - (expected_errors / L) if L > 0 else 0.0
+            return accuracy_basewise
+
 def main():
 	args = parse_args()
 
@@ -193,7 +247,11 @@ def main():
 				try:
 					aln.get_tag('rq')
 				except KeyError:
-					aln.set_tag('rq', 0.99, value_type='f')
+					if not args.compute_quality:
+						aln.set_tag('rq', args.default_quality, value_type='f')
+					else:
+						accuracy_basewise = compute_quality_metrics(aln, default_rq=args.default_quality)
+						aln.set_tag('rq', accuracy_basewise, value_type='f')
 				outh.write(aln)
 				count += 1
 				if args.verbose and count % 100000 == 0:

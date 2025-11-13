@@ -37,6 +37,18 @@ Currently included scripts
     - PU is derived from the first alignment's query name. If that's not the
       correct heuristic for your data, consider adjusting the script or
       providing a constant PU and/or mapping logic.
+  - Notes & dependencies:
+    - Requires `pysam` to read/write BAM files. If you provide FASTQ input
+      the script will call `samtools import` to make a temporary BAM, so
+      `samtools` must be available in your PATH when using FASTQ inputs.
+    - The script will add or update an `rq` tag (read quality) if missing. By
+      default it writes a constant value (configurable with
+      `--default-quality`), or if `--compute_quality` is supplied the script
+      computes a basewise accuracy from per-base Phred scores and writes the
+      result as `rq:f:<value>`.
+    - When updating/creating `@RG` entries the script ensures `DS` contains
+      `READTYPE=CCS` and fills missing `PU` values so downstream Iso-Seq
+      tools (e.g., `isoseq refine`) receive the expected metadata.
 
 - `add_bx_tag.py`
   - Purpose: Add or replace a per-read `bx` array tag (`bx:B:i,<len1>,<len2>`) on every
