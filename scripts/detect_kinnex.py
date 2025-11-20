@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Detect Kinnex-style concatemer reads by counting multiple polyA tracts.
 
-For each sampled read the script reports the number of polyA hits and, for
+For each sampled read the script detects the number of polyA hits and, for
 each hit, a tuple with the 100 bp after the polyA hit and the first 100 bp of
-the read. Output is JSON Lines (one JSON object per read). Works with BAM
-input (requires pysam) or FASTQ/FASTQ.gz.
+the read. That information is then used to infer if the data contains Kinnex
+concatemers and, in that case, to extract the Kinnex linkers sequences.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import re
 from typing import Iterable, List, Tuple
 from collections import Counter
 import edlib
+from string import ascii_uppercase
 from infer_adapters import compute_core_and_barcodes
 try:
     import pysam
@@ -24,78 +25,20 @@ except Exception:  # pragma: no cover - optional dependency
     pysam = None
 
 MERGE_GAP = 1
-def _build_weighted_consensus(
-    seq_counts: List[Tuple[str, int]],
-    min_support_frac: float,
-    n_threshold: float,
-    align: str,
-) -> str:
-    '''
-    Function to generate a consensus sequences from counter
+MIN_POLYA_LEN = 15
+MIN_SUPPORT = 0.6
+N_THRESHOLD = 0.2
 
-    Args:
-        seq_counts (List[Tuple[str, int]]): Counter of adapter sequences
-        min_support_frac (float): minimum support fraction for consensus
-        n_threshold (float): N threshold for consensus
-        align (str): alignment direction ("left" or "right")
-
-    Returns:
-        str: consensus sequence
-    '''
-    if not seq_counts:
-        return ""
-    # max length of sequences (needed for padding)
-    maxlen = max(len(s) for s, _ in seq_counts)
-    padded = []
-    
-    # Padding of the reads, right for 3' consensus and left for 5' consensus
-    # ex. AAAAAGCT, AAAAAGGCT (with G duplication) -> GCT, GGCT -> NGCT, GGCT
-    # this way the presence of insertions in 3' adaptors lead to positions in 5'
-    # consensus with lots of Ns that get discarded
-    for seq, weight in seq_counts:
-        if align == "right":
-            pad = "N" * (maxlen - len(seq)) + seq
-        else:
-            pad = seq + "N" * (maxlen - len(seq))
-        padded.append((pad, weight))
-
-    # list to store the consensus bases
-    collected: List[str] = []
-    for idx in range(maxlen):
-        counter = Counter()
-        total = 0
-        n_weight = 0
-        # Build the base counts for this position
-        for seq, weight in padded:
-            base = seq[idx]
-            counter[base] += weight
-            total += weight
-            if base == "N":
-                n_weight += weight
-
-        # Compute statistics and decide consensus base
-        non_n = {base: w for base, w in counter.items() if base != "N"}
-        base, count = Counter(non_n).most_common(1)[0]
-        support = total - n_weight
-        # Ratio of N votes too high
-        if n_weight / total > n_threshold:
-            collected.append("N")
-        # Ratio of top base too low
-        elif count / support < min_support_frac:
-            collected.append("N")
-        else:
-            collected.append(base)
-
-    return "".join(collected)
 
 def parse_args():
     p = argparse.ArgumentParser(description="Detect Kinnex concatemer signatures")
     p.add_argument("input", help="Input BAM or FASTQ (gz) file")
     p.add_argument("--sample", type=int, default=1000, help="Number of reads to sample (default: 1000)")
-    p.add_argument("--min-poly", type=int, default=15, help="Minimum consecutive A bases to call a polyA hit (default: 10)")
+    p.add_argument("--min-poly", type=int, default=MIN_POLYA_LEN, help="Minimum consecutive A bases to call a polyA hit (default: 15)")
     p.add_argument("--post-len", type=int, default=100, help="Number of bases to extract after polyA (default: 100)")
     p.add_argument("--head-len", type=int, default=100, help="Number of bases to extract from read start (default: 100)")
     p.add_argument("--output", default=None, help="Write JSONL output to file (default: stdout)")
+    p.add_argument("--verbose", action="store_true", help="Enable verbose output")
     return p.parse_args()
 
 def revcomp_seq(seq: str) -> str:
@@ -172,29 +115,38 @@ def detect_polyA(seq: str, min_poly: int) -> list[tuple[int, int]]:
     polyA_merged = merge_regions(polyA_canditates)
     return polyA_merged
     
-def process_sequences(seq_iter, args, out_fh=None):
+def process_sequences(seq_iter, min_poly: int, head_len: int, post_len: int) -> List[dict]:
+    """Process sequences to detect polyA hits and extract relevant info.
+    
+    Args:
+        seq_iter: Iterable of (name, sequence) tuples
+        min_poly: Minimum length of polyA to detect
+        head_len: Length of 5' head sequence to extract
+        post_len: Length of sequence to extract after polyA hit
+    Returns:
+        List[dict]: List of processed read information with polyA hits
+    """
     processed_reads: List[dict] = []
     count = 0
     for name, seq in seq_iter:
         count += 1
-        poly_hits = detect_polyA(seq, args.min_poly)
+        poly_hits = detect_polyA(seq, min_poly)
+        
+        # Check reverse complement for more polyA hits if few found
         if len(poly_hits) <= 2:
             seq_rev = revcomp_seq(seq)
-            polyT_hits = detect_polyA(seq_rev, args.min_poly)
+            polyT_hits = detect_polyA(seq_rev, min_poly)
             if len(polyT_hits) > len(poly_hits):
                 poly_hits = polyT_hits
                 seq = seq_rev
-        head = seq[: args.head_len]
+        head = seq[: head_len]
         hits = []
         for start, end in poly_hits:
-            post = seq[end : end + args.post_len]
+            post = seq[end : end + post_len]
             hits.append({"pos": start, "seq": post})
 
         record = {"read": name, "num_polyA": len(poly_hits), "hits": hits, "head": head}
         processed_reads.append(record)
-        line = json.dumps(record)
-        if out_fh:
-            out_fh.write(line + "\n")
 
     return processed_reads
 
@@ -220,7 +172,7 @@ def count_n_blocks(seq: str) -> list[tuple[int, int]]:
     return n_blocks
 
 
-def infer_kinnex_from_reads(processed_reads: List[dict]) -> None:
+def infer_kinnex_from_reads(processed_reads: List[dict], verbose: bool) -> list[str]:
     '''
     Try to infer it we have kinnex data. In case it is try to identify the
     primers.
@@ -230,6 +182,9 @@ def infer_kinnex_from_reads(processed_reads: List[dict]) -> None:
             - num_polyA: number of polyA hits
             - head: 5' head sequence
             - hits: list of dicts with 'seq' key for 3' adapter sequences
+        verbose (bool): whether to print verbose output
+    Returns:
+        List[str]: list of kinnex linkers sequences including the first adapter
     '''
     # Counter for the different features
     segments_counter = Counter() # of number of polyA segments per read
@@ -240,45 +195,139 @@ def infer_kinnex_from_reads(processed_reads: List[dict]) -> None:
     for rec in processed_reads:
         segments_counter[rec["num_polyA"]] +=1
     most_common_num = segments_counter.most_common(1)[0][0]
+    
+    # check if we have concatemers
+    if most_common_num < 2:
+        print("No concatemers detected. The most common number of polyA segments is less than 2.")
+        return []
 
     # Recover sequences and their frequencies to build consensuses
     for rec in processed_reads:
-        heads_counter[rec["head"]] +=1
+        # only from full concatemers
         if rec["num_polyA"] == most_common_num:
+            heads_counter[rec["head"]] +=1
             for hit in rec["hits"]:
                 adapter_3p_counter[hit["seq"]] +=1
     
     # Build initial consensuses
-    seq_3p, _  = compute_core_and_barcodes(adapter_3p_counter, "3p", 0.6,0.2, False)
-    print(f"Consensus 3' adapter sequence: {seq_3p}")
-    seq_5p, _ = compute_core_and_barcodes(heads_counter, "5p", 0.6,0.2, False)
-
-    print(f"Consensus 5' head sequence: {seq_5p}")
+    seq_3p, _  = compute_core_and_barcodes(adapter_3p_counter, "3p", MIN_SUPPORT, N_THRESHOLD, False)
+    seq_5p, _ = compute_core_and_barcodes(heads_counter, "5p", MIN_SUPPORT, N_THRESHOLD, False)
+    if verbose:
+        print(f"Consensus 5' head sequence: {seq_5p}")
+        print(f"Consensus 3' adapter sequence: {seq_3p}")
+    '''
+    Build common sequence between 5' head and 3' sequence
+    This works because the 3' sequence contains at the end the 5'
+    adapter sequence:
+    5' adapter: Kinnex - 5' Adapter - Insert
+    3' adapter: Insert - polyA - 3' Adapter - Kinnex - 5' Adapter
+    '''
     adapter_5p = build_common_ends(seq_5p, seq_3p, "3p")
-    print(f"Common sequence between 5' head and 3' adapter: {adapter_5p}")
-    a_sequence = seq_5p[:-len(adapter_5p)]
-    print(a_sequence)
-    print(len(a_sequence)+ len(adapter_5p))
-    print(len(seq_5p))
-    # count the number of N blocks in adapter_5p
-    n_blocks_5p_adapter = count_n_blocks(adapter_5p)
-    print(f"N blocks in adapter_5p: {n_blocks_5p_adapter}")
-    # count the number of N blocks in seq_3p before adapter_5p
-    n_blocks = count_n_blocks(seq_3p[:-len(adapter_5p)])
-    print(f"N blocks before adapter_5p: {n_blocks}")
+    if verbose:
+        print(f"Common sequence between 5' head and 3' adapter: {adapter_5p}")
     
-def main() -> None:
+    # Extract the first kinnex adapter sequence
+    a_sequence = seq_5p[:-len(adapter_5p)]
+    a_len = len(a_sequence)
+        
+    # Extract the 3' adapter
+    adapter_3p = seq_3p[:-len(adapter_5p)]
+
+    # Extract kinnex linkers and add the a_sequence at the start
+    linkers_seqs = extract_kinnex_linkers(processed_reads, most_common_num, adapter_3p)
+    linkers_seqs = [a_sequence] + linkers_seqs
+
+    return linkers_seqs
+    
+def extract_kinnex_linkers(processed_reads: List[dict], most_common_num: int, adapter_3p: str) -> List[str]:
+    '''
+    Given the 3' adapter, extract the kinnex linkers that are immediately
+    downstream. In order to find the adapter map it using edlib.
+
+    Args:
+        processed_reads (List[dict]): reads with polyA hits and sequences
+        most_common_num (int): most common number of polyA segments
+        adapter_3p (str): 3' adapter consensus sequence
+
+    Returns:
+        List[str]: list of extracted kinnex linkers
+    '''
+    def extract_adapter_bait(adapter_3p: str) -> str:
+        """Extract adapter bait sequence from 3' adapter consensus
+        
+        Args:
+            adapter_3p (str): 3' adapter consensus sequence
+
+        Returns:
+            str: Extracted adapter bait sequence
+        """
+        if len(n_bloccks_3p) == 1: # just kinnex adapater, no multiplexing
+            n_block_start = n_bloccks_3p[0][0]
+            adapter_bait = adapter_3p[(n_block_start-10):n_block_start]
+        else:
+            # take sequence before last N block
+            n_block_start = n_bloccks_3p[-1][0]
+            adapater_bait_start = max(n_bloccks_3p[-2][1], n_block_start - 10)
+            adapter_bait = adapter_3p[adapater_bait_start:n_block_start]
+        return adapter_bait
+    
+    # Get the possition and length of kinnex linkers based on N blocks
+    n_bloccks_3p = count_n_blocks(adapter_3p)
+    n_len = n_bloccks_3p[-1][1] - n_bloccks_3p[-1][0] if n_bloccks_3p else 0
+    
+    # Extract smaller sequence that will be used for alignment
+    adapter_bait = extract_adapter_bait(adapter_3p)
+
+    # we leverage the fact that kinnex linkers are in the same order in
+    # all of the reads
+    l_linker_counter: list[Counter[str]] = [Counter() for _ in range(most_common_num)]
+    for rec in processed_reads:
+        if rec["num_polyA"] == most_common_num:
+            for idx, hit in enumerate(rec["hits"]):
+                seq = hit["seq"] # extract the sequences downstream of polyA
+                # Find the adapter position using edlib
+                aligment = edlib.align(adapter_bait, seq, mode="HW", task="locations")
+                aligment_end = aligment["locations"][0][1] if aligment["locations"] else None
+                if aligment_end is not None:
+                    # Aligment end is inclusive, so we add 1
+                    aligment_end +=1
+                    seq_kinnex = seq[aligment_end:aligment_end+n_len]
+                    l_linker_counter[idx][seq_kinnex] +=1
+    
+    # if errors are low enough the most common sequence should be the
+    # correct kinnex linker
+    l_kinnex_linkers = [count.most_common(1)[0][0] for count in l_linker_counter]
+    
+    return l_kinnex_linkers
+
+
+def write_linkers_fasta(linkers: List[str], outfile: str)-> None:
+    """Write the detected kinnex linkers to a FASTA file.
+
+    Args:
+        linkers (List[str]): List of kinnex linker sequences
+        outfile (str): Output FASTA file path
+    """
+    with open(outfile, "w") as fh:
+        for idx, seq in enumerate(linkers):
+            fh.write(f">{ascii_uppercase[idx]}\n{seq}\n")
+
+def main():
     args = parse_args()
-
-    out_fh = open(args.output, "w") if args.output else None
-
+    outfile = args.output if args.output else "kinnex_linkers.fasta"
+    # Opens the file and builds an iterator over sequences
     seq_iter = iterate_sequences(args.input, args.sample)
-    processed_reads = process_sequences(seq_iter, args, out_fh)
+    
+    # preprocess sequences to detect polyA hits
+    processed_reads = process_sequences(seq_iter, args.min_poly, args.head_len, args.post_len)
 
-
-    if out_fh:
-        out_fh.close()
-    infer_kinnex_from_reads(processed_reads)
+    # extract the linkers
+    linkers = infer_kinnex_from_reads(processed_reads, args.verbose)
+    
+    if linkers:
+        write_linkers_fasta(linkers, outfile)
+    else:
+        print("No kinnex linkers detected.")
 
 if __name__ == "__main__":
     main()
