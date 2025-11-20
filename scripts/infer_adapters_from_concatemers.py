@@ -15,6 +15,7 @@ import os
 import re
 from collections import Counter
 from typing import Iterable, List, Optional, Tuple
+from utils import build_consensus
 
 try:
     import pysam
@@ -23,8 +24,8 @@ except Exception:  # pragma: no cover - optional dependency
 
 
 MERGE_GAP = 1
-N_THRESHOLD = 0.8
-DEFAULT_SUPPORT_FRAC = 0.3
+N_THRESHOLD = 0.1
+DEFAULT_SUPPORT_FRAC = 0.8
 END_WINDOW = 50  # bases from read end to search for polyA/polyT
 
 
@@ -196,79 +197,6 @@ def find_polyA_candidates(
             return "", "T"
     return None, None
 
-
-def _build_weighted_consensus(
-    seq_counts: List[Tuple[str, int]],
-    min_support_frac: float,
-    n_threshold: float,
-    align: str,
-) -> str:
-    """Build a weighted consensus sequence from a list of (sequence, weight)."""
-    if not seq_counts:
-        return ""
-    # max length of sequences (needed for padding)
-    maxlen = max(len(s) for s, _ in seq_counts)
-    padded = []
-    
-    # Padding of the reads, right for 3' consensus and left for 5' consensus
-    # ex. AAAAAGCT, AAAAAGGCT (with G duplication) -> GCT, GGCT -> NGCT, GGCT
-    # this way the presence of insertions in 3' adaptors lead to positions in 5'
-    # consensus with lots of Ns that get discarded
-    for seq, weight in seq_counts:
-        if align == "right":
-            pad = "N" * (maxlen - len(seq)) + seq
-        else:
-            pad = seq + "N" * (maxlen - len(seq))
-        padded.append((pad, weight))
-
-    # list to store the consensus bases
-    collected: List[str] = []
-    for idx in range(maxlen):
-        counter = Counter()
-        total = 0
-        n_weight = 0
-        # Build the base counts for this position
-        for seq, weight in padded:
-            base = seq[idx]
-            counter[base] += weight
-            total += weight
-            if base == "N":
-                n_weight += weight
-        # Compute statistics and decide consensus base
-        non_n = {base: w for base, w in counter.items() if base != "N"}
-        base, count = Counter(non_n).most_common(1)[0]
-        support = total - n_weight
-        # Ratio of N votes too high
-        if n_weight / total > n_threshold:
-            collected.append("N")
-        # Ratio of top base too low
-        elif count / support < min_support_frac:
-            collected.append("N")
-        else:
-            collected.append(base)
-
-    return "".join(collected)
-
-
-def build_consensus(
-    seq_counts: List[Tuple[str, int]],
-    min_support_frac: float,
-    n_threshold: float,
-    align: str,
-) -> str:
-    '''
-    Wrapper to _build_weighted_consensus
-
-    Args:
-        seq_counts (List[Tuple[str, int]]): Counter of adapter sequences
-        min_support_frac (float): minimum support fraction for consensus
-        n_threshold (float): N threshold for consensus
-        align (str): alignment direction ("left" or "right")
-
-    Returns:
-        str: consensus sequence
-    '''
-    return _build_weighted_consensus(seq_counts, min_support_frac, n_threshold, align)
 
 def resolve_output_path(
     input_path: str,
