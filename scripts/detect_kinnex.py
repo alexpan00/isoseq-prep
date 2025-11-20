@@ -19,6 +19,7 @@ from collections import Counter
 import edlib
 from string import ascii_uppercase
 from infer_adapters import compute_core_and_barcodes
+from utils import revcomp_seq, iterate_sequences
 try:
     import pysam
 except Exception:  # pragma: no cover - optional dependency
@@ -40,58 +41,6 @@ def parse_args():
     p.add_argument("--output", default=None, help="Write JSONL output to file (default: stdout)")
     p.add_argument("--verbose", action="store_true", help="Enable verbose output")
     return p.parse_args()
-
-def revcomp_seq(seq: str) -> str:
-    """Return the reverse complement of ``seq`` (A/T/C/G/N only)."""
-    table = str.maketrans("ATCGN", "TAGCN")
-    return seq.translate(table)[::-1]
-
-def read_fastq_seqs(path: str, limit: int) -> Iterable[tuple[str, str]]:
-    opener = gzip.open if path.lower().endswith(".gz") else open
-    with opener(path, "rt") as fh:
-        count = 0
-        while count < limit:
-            hdr = fh.readline()
-            if not hdr:
-                break
-            seq = fh.readline().strip()
-            fh.readline()  # +
-            fh.readline()  # qual
-            name = hdr.strip().split()[0][1:] if hdr.startswith("@") else f"read_{count}"
-            yield name, seq
-            count += 1
-
-
-def read_bam_seqs(path: str, limit: int) -> Iterable[tuple[str, str]]:
-    if pysam is None:
-        raise RuntimeError("pysam is required for BAM input; install pysam or provide FASTQ")
-    with pysam.AlignmentFile(path, "rb", check_sq=False) as bam:
-        count = 0
-        for aln in bam.fetch(until_eof=True):
-            if aln.is_secondary or aln.is_supplementary:
-                continue
-            seq = aln.query_sequence
-            if not seq:
-                continue
-            yield aln.query_name, seq
-            count += 1
-            if count >= limit:
-                break
-
-
-def iterate_sequences(path: str, sample: int) -> Iterable[tuple[str, str]]:
-    path_lower = path.lower()
-    if path_lower.endswith(".bam"):
-        return read_bam_seqs(path, sample)
-    if path_lower.endswith((".fastq", ".fq", ".fastq.gz", ".fq.gz")):
-        return read_fastq_seqs(path, sample)
-    # fallback: try BAM first if pysam present
-    if pysam is not None and os.path.exists(path):
-        try:
-            return read_bam_seqs(path, sample)
-        except Exception:
-            return read_fastq_seqs(path, sample)
-    return read_fastq_seqs(path, sample)
 
 
 def detect_polyA(seq: str, min_poly: int) -> list[tuple[int, int]]:
@@ -316,8 +265,8 @@ def main():
     args = parse_args()
     outfile = args.output if args.output else "kinnex_linkers.fasta"
     # Opens the file and builds an iterator over sequences
-    seq_iter = iterate_sequences(args.input, args.sample)
-    
+    seq_iter = iterate_sequences(args.input, args.sample, return_name=True)
+
     # preprocess sequences to detect polyA hits
     processed_reads = process_sequences(seq_iter, args.min_poly, args.head_len, args.post_len)
 

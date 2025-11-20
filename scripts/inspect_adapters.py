@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import os
 from typing import Dict, Iterable, List, Sequence, Tuple, Optional
+from utils import revcomp_seq
 
 import edlib  # type: ignore
 import pysam
@@ -76,11 +77,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def reverse_complement(seq: str) -> str:
-    table = str.maketrans("ACGTNacgtn", "TGCANtgcan")
-    return seq.translate(table)[::-1]
-
-
 def load_primers(fasta_path: str) -> List[Dict[str, str]]:
     primers: List[Dict[str, str]] = []
     if not os.path.exists(fasta_path):
@@ -111,7 +107,7 @@ def load_primers(fasta_path: str) -> List[Dict[str, str]]:
         name = primer["name"]
         sequence = primer["sequence"]
         augmented.append(primer)
-        augmented.append({"name": f"{name}_rc", "sequence": reverse_complement(sequence)})
+        augmented.append({"name": f"{name}_rc", "sequence": revcomp_seq(sequence)})
     return augmented
 
 

@@ -15,7 +15,7 @@ import os
 import re
 from collections import Counter
 from typing import Iterable, List, Optional, Tuple
-from utils import build_consensus
+from utils import build_consensus, revcomp_seq, iterate_sequences
 
 try:
     import pysam
@@ -27,12 +27,6 @@ MERGE_GAP = 1
 N_THRESHOLD = 0.1
 DEFAULT_SUPPORT_FRAC = 0.8
 END_WINDOW = 50  # bases from read end to search for polyA/polyT
-
-
-def revcomp_seq(seq: str) -> str:
-    """Return the reverse complement of ``seq`` (A/T/C/G/N only)."""
-    table = str.maketrans("ATCGN", "TAGCN")
-    return seq.translate(table)[::-1]
 
 
 def parse_args() -> argparse.Namespace:
@@ -91,48 +85,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def read_fastq_seqs(path: str, limit: int) -> Iterable[str]:
-    opener = gzip.open if path.lower().endswith(".gz") else open
-    with opener(path, "rt") as fh:
-        for i in range(limit):
-            header = fh.readline()
-            if not header:
-                break
-            seq = fh.readline()
-            if not seq:
-                break
-            yield seq.strip()
-            fh.readline()  # '+'
-            fh.readline()  # quality
-
-
-def read_bam_seqs(path: str, limit: int) -> Iterable[str]:
-    if pysam is None:
-        raise RuntimeError("pysam is required for BAM input; install pysam or provide FASTQ")
-    with pysam.AlignmentFile(path, "rb", check_sq=False) as bam:
-        count = 0
-        for aln in bam.fetch(until_eof=True):
-            seq = aln.query_sequence
-            if seq:
-                yield seq
-                count += 1
-                if count >= limit:
-                    break
-
-
-def iterate_sequences(path: str, sample: int) -> Iterable[str]:
-    path_lower = path.lower()
-    if path_lower.endswith(".bam"):
-        return read_bam_seqs(path, sample)
-    if path_lower.endswith((".fastq", ".fq", ".fastq.gz", ".fq.gz")):
-        return read_fastq_seqs(path, sample)
-    # fallback attempts
-    if pysam is not None and os.path.exists(path):
-        try:
-            return read_bam_seqs(path, sample)
-        except Exception:
-            return read_fastq_seqs(path, sample)
-    return read_fastq_seqs(path, sample)
 
 '''
 Potential improvements for this functions:
