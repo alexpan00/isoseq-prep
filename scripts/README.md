@@ -51,6 +51,10 @@ Currently included scripts
       tools (e.g., `isoseq refine`) receive the expected metadata.
 
 - `add_bx_tag.py`
+  - I don't recommend anyone to use this script. I just created it because I sow
+    this issue on [GitHub](https://github.com/PacificBiosciences/pbbioconda/issues/150)
+    and thought that you should be able to run the tool in your data. After
+    that I realize why it was a bad idea.
   - Purpose: Add or replace a per-read `bx` array tag (`bx:B:i,<len1>,<len2>`) on every
     alignment. Defaults to barcode length values 40 and 39, with CLI flags to
     override them.
@@ -88,8 +92,8 @@ Currently included scripts
 - `infer_adapters.py`
   - Purpose: Sample reads from a BAM or FASTQ file, detect polyA/polyT signals,
     and infer Iso-Seq adapter or multiplexed primer cores. With the
-    `--multiplexed` flag it separates shared primer cores from barcode flanks
-    and reports barcode counts for both read ends.
+    `--multiplexed` flag it separates shared primer cores and tries to infer
+    sample barcodes.
 
   - Usage examples:
 
@@ -128,7 +132,8 @@ Currently included scripts
       complements before matching.
 
 - `infer_adapters_from_concatemers.py`
-  - Purpose: Recover the shared primer core that persists in concatemer reads by
+  - Purpose: When you want to run `isoseq refine` but you don't have primers fasta. 
+    Recover the shared primer core that persists in concatemer reads by
     scanning for terminal polyA/polyT boundaries, extracting the flanking
     adapter sequence, and building a weighted consensus.
 
@@ -145,4 +150,20 @@ Currently included scripts
     - Writes a two-entry FASTA containing the inferred 5' and 3' primer cores
       unless `--no-fasta` is provided.
     - Concatemer reads aren't really abundant so a big `--sample` is recommended
+
+- `detect_kinnex.py`
+  - Purpose: Detect Kinnex-style concatemer reads by counting multiple polyA tracts.
+    It infers if the data contains Kinnex concatemers and extracts the Kinnex
+    linker sequences into a FASTA file.
+
+  - Usage example:
+
+    ```bash
+    python scripts/detect_kinnex.py input.bam --sample 1000 --output linkers.fasta
+    ```
+
+  - Notes & dependencies:
+    - Requires `pysam` for BAM input and `edlib` for alignment.
+    - Detects polyA hits and uses them to identify the segmentation of concatemers.
+    - Outputs a FASTA file containing the inferred linker sequences.
 
