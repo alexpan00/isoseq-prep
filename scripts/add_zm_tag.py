@@ -14,6 +14,8 @@ Additional behavior implemented by the script:
 - Optionally computes an `rq` tag (read quality / accuracy) from base
 	qualities with `--compute_quality` and writes it as a float tag when
 	`rq` is missing. Otherwise a default `rq` value is written (`--default-quality`).
+- Optionally add `np`tag when number of passes is missing. This is useful for
+	sc data, where this tag is used in the groupedup step.
 - Supports `--force` to overwrite existing output and `--verbose` for progress
 	messages.
 
@@ -39,6 +41,7 @@ import subprocess
 import tempfile
 
 DEFAULT_QUALITY = 0.99
+DEFAULT_NP = 10
 
 
 def parse_args():
@@ -50,6 +53,7 @@ def parse_args():
 	p.add_argument("-f", "--force", action="store_true", help="Overwrite output if it exists")
 	p.add_argument("--default-quality", type=float, default=DEFAULT_QUALITY, help="Default RQ value to assign if missing (default: 0.99) or --compute_quality flag is not used")
 	p.add_argument("--compute_quality", action="store_true", help="Compute basewise accuracy from quality scores to assign rq tag if missing")
+	p.add_argument("--np-tag", type=int, default=DEFAULT_NP, help="If provided, add np tag with this value when missing. (default: 10)")
 	p.add_argument("-v", "--verbose", action="store_true", help="Print progress every 100k reads")
 	return p.parse_args()
 
@@ -244,6 +248,7 @@ def main():
 					aln.set_tag('zm', zm, value_type='i')
 				else:
 					aln.set_tag('zm', count, value_type='i')
+				# TODO: create a getter-setter utility for tags
 				try:
 					aln.get_tag('rq')
 				except KeyError:
@@ -252,6 +257,10 @@ def main():
 					else:
 						accuracy_basewise = compute_quality_metrics(aln, default_rq=args.default_quality)
 						aln.set_tag('rq', accuracy_basewise, value_type='f')
+				try:
+					aln.get_tag('np')
+				except KeyError:
+					aln.set_tag('np', args.np_tag, value_type='i')
 				outh.write(aln)
 				count += 1
 				if args.verbose and count % 100000 == 0:
