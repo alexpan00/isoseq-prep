@@ -186,28 +186,36 @@ def prepare_header(header_dict: dict, pu_values: set) -> tuple[dict, dict]:
 
 
 def compute_quality_metrics(aln: pysam.AlignedSegment, default_rq: float = DEFAULT_QUALITY)-> float:
-            """Return accuracy_basewise or placeholder if no quals.
-            
-            To calculate basewise accuracy from quality values we need to convert
-            the Phred scores to probabilities by using the formula:
-				P(error) = 10^(-Q/10)
-			Then we can compute accuracy as:
-            accuracy = 1 - (sum of error probabilities / length of sequence)
-            
-            Args:
-				aln: pysam AlignedSegment object
-				default_rq: default accuracy value to return if no quality scores are present
-			Returns:
-				accuracy_basewise: float
-            """
-            quals = aln.query_qualities  # list of ints, or None
-            if quals is None:
-                return default_rq
-            probs = [10 ** (-q / 10.0) for q in quals]
-            L = len(probs)
-            expected_errors = sum(probs)
-            accuracy_basewise = 1.0 - (expected_errors / L) if L > 0 else 0.0
-            return accuracy_basewise
+	"""Return accuracy_basewise or placeholder if no quals.
+	
+	To calculate basewise accuracy from quality values we need to convert
+	the Phred scores to probabilities by using the formula:
+		P(error) = 10^(-Q/10)
+	Then we can compute accuracy as:
+	accuracy = 1 - (sum of error probabilities / length of sequence)
+	
+	Args:
+		aln: pysam AlignedSegment object
+		default_rq: default accuracy value to return if no quality scores are present
+	Returns:
+		accuracy_basewise: float
+	"""
+	quals = aln.query_qualities  # list of ints, or None
+	if quals is None:
+		return default_rq
+	probs = [10 ** (-q / 10.0) for q in quals]
+	L = len(probs)
+	expected_errors = sum(probs)
+	accuracy_basewise = 1.0 - (expected_errors / L) if L > 0 else 0.0
+	return accuracy_basewise
+
+
+def tag_getter_setter(aln: pysam.AlignedSegment, tag: str, value, value_type: str) -> None:
+	"""Utility to get/set tags in pysam AlignedSegment objects."""
+	try:
+		aln.get_tag(tag)
+	except KeyError:
+		aln.set_tag(tag, value, value_type=value_type)
 
 def main():
 	args = parse_args()
@@ -243,24 +251,16 @@ def main():
 				if rg_id:
 					aln.set_tag('RG', rg_id, value_type='Z')
 
-				zm = extract_zm_from_qname(qname)
-				if zm is not None:
-					aln.set_tag('zm', zm, value_type='i')
-				else:
-					aln.set_tag('zm', count, value_type='i')
-				# TODO: create a getter-setter utility for tags
-				try:
-					aln.get_tag('rq')
-				except KeyError:
-					if not args.compute_quality:
-						aln.set_tag('rq', args.default_quality, value_type='f')
-					else:
-						accuracy_basewise = compute_quality_metrics(aln, default_rq=args.default_quality)
-						aln.set_tag('rq', accuracy_basewise, value_type='f')
-				try:
-					aln.get_tag('np')
-				except KeyError:
-					aln.set_tag('np', args.np_tag, value_type='i')
+				if zm:= extract_zm_from_qname(qname) is None:
+					zm = count
+				tag_getter_setter(aln, 'zm', zm, 'i')
+
+				# Read quality tag
+				accuracy_basewise = compute_quality_metrics(aln, default_rq=args.default_quality) if args.compute_quality else args.default_quality
+				tag_getter_setter(aln, "rq", accuracy_basewise, "f")
+
+				# Number of passes tag
+				tag_getter_setter(aln, "np", args.np_tag, "i")
 				outh.write(aln)
 				count += 1
 				if args.verbose and count % 100000 == 0:
