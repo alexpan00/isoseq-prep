@@ -4,12 +4,27 @@ Currently contains consensus-building helpers extracted from multiple scripts.
 """
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 import os
+import gzip
 from typing import List, Tuple, Iterable
 
 import pysam
+import edlib
 
+################
+#     MISC     #
+################
+
+def revcomp_seq(seq: str) -> str:
+    """Return the reverse complement of ``seq`` (A/T/C/G/N)."""
+    table = str.maketrans("ACGTNacgtn", "TGCANtgcan")
+    return seq.translate(table)[::-1]
+
+    
+#################################
+#     Primer reconstruction     #
+#################################
 
 def _build_weighted_consensus(
     seq_counts: List[Tuple[str, int]],
@@ -85,13 +100,164 @@ def build_consensus(
     """Wrapper around _build_weighted_consensus for convenience."""
     return _build_weighted_consensus(seq_counts, min_support_frac, n_threshold, align)
 
+def compute_core_and_barcodes(
+    counter: Counter[str],
+    orientation: str,
+    min_support_frac: float,
+    n_threshold: float,
+    multiplexed: bool,
+) -> Tuple[str, Counter[str]]:
+    '''
+    Function to call the core primer sequence and potentially
+    identify the sample barcodes
 
-def revcomp_seq(seq: str) -> str:
-    """Return the reverse complement of ``seq`` (A/T/C/G/N)."""
-    table = str.maketrans("ACGTNacgtn", "TGCANtgcan")
-    return seq.translate(table)[::-1]
+    Args:
+        counter (Counter[str]): counter of adapter sequences
+        orientation (str): 5' or 3' end
+        min_support_frac (float): minimum support fraction for consensus
+        n_threshold (float): N threshold for consensus
+        multiplexed (bool): whether the data is multiplexed
 
+    Returns:
+        Tuple[str, Counter[str]]: core primer sequence and barcode counts, if not
+            multiplexed the second element is empty
+    '''
+    if not counter:
+        return "", Counter()
+    seq_counts = counter.most_common()
+    align_map = {
+        "3p": "left",   # build 3' consensus from right to left
+        "5p": "left",  # build 5' consensus from left to right
+    }
+    align = align_map.get(orientation, "left")
+    core = build_consensus(seq_counts, min_support_frac, n_threshold, align)
 
+    if not core:
+        return "", Counter()
+    else:
+        core = core.strip("N")
+
+    barcode_counts: Counter[str] = Counter()
+    if multiplexed:
+        if "N" in core:
+            idx_start = core.find("N")
+            idx_end = core.rfind("N") + 1
+            for seq, weight in counter.items():
+                if len(seq) < len(core):
+                    continue
+                barcode = seq[idx_start: idx_end]
+                barcode_counts[barcode] += weight
+        else:
+            core_len = len(core)
+            for seq, weight in counter.items():
+                if len(seq) < core_len:
+                    continue
+                if orientation == "5p":
+                    idx = seq.rfind(core[:10])
+                    if idx == -1:
+                        barcode = seq[:-core_len]
+                    else:
+                        barcode = seq[:idx]
+                else:
+                    barcode = seq[core_len:]
+
+                barcode_counts[barcode] += weight
+
+        barcode_counts = collapse_barcodes(barcode_counts)
+    return core, barcode_counts
+
+def collapse_barcodes(
+    barcode_counts: Counter[str],
+    *,
+    top_n: int = 15,
+    selected_target_fraction: float = 0.9,
+    min_candidate_fraction: float = 0.005,
+) -> Counter[str]:
+    """Collapse shorter/noisier barcodes onto high-confidence representatives.
+
+    The heuristic follows the user-specified procedure: determine the dominant
+    barcode length from the top ``top_n`` sequences, keep those as anchors, and
+    iteratively absorb other barcodes whose nearest anchor (by edit distance)
+    is unique while either overall anchor coverage remains below
+    ``selected_target_fraction`` or the candidate itself exceeds
+    ``min_candidate_fraction`` of observations.
+    """
+
+    if not barcode_counts:
+        return barcode_counts
+    if edlib is None:
+        raise RuntimeError(
+            "edlib is required for barcode collapsing; install edlib (e.g. pip install edlib)."
+        )
+
+    total = sum(barcode_counts.values())
+    if total == 0:
+        return barcode_counts
+
+    top_items = barcode_counts.most_common(top_n)
+    if not top_items:
+        return barcode_counts
+
+    length_scores: defaultdict[int, int] = defaultdict(int)
+    for barcode, count in top_items:
+        length_scores[len(barcode)] += count
+
+    if not length_scores:
+        return barcode_counts
+
+    # Prefer the most supported length; break ties in favour of longer barcodes.
+    target_length = max(length_scores.items(), key=lambda kv: (kv[1], kv[0]))[0]
+
+    anchors = [barcode for barcode, _ in top_items if len(barcode) == target_length]
+    if not anchors:
+        anchors = [barcode for barcode, _ in top_items]
+
+    anchors_set = set(anchors)
+    result = Counter()
+    selected_total = 0
+    for barcode in anchors:
+        count = barcode_counts[barcode]
+        result[barcode] += count
+        selected_total += count
+
+    # Process remaining barcodes from most to least abundant.
+    for barcode, count in barcode_counts.most_common():
+        if barcode in anchors_set:
+            continue
+
+        candidate_fraction = count / total
+        distances = []
+        for anchor in anchors:
+            alignment = edlib.align(barcode, anchor, mode="NW", task="distance")
+            dist = alignment.get("editDistance")
+            if dist == -1:
+                continue
+            distances.append((dist, anchor))
+
+        if not distances:
+            result[barcode] += count
+            continue
+
+        distances.sort(key=lambda pair: (pair[0], pair[1]))
+        min_dist, best_anchor = distances[0]
+
+        # Require a unique best anchor (no ties on distance).
+        if len(distances) > 1 and distances[0][0] == distances[1][0]:
+            result[barcode] += count
+            continue
+
+        selected_fraction = selected_total / total if total else 0.0
+        if selected_fraction < selected_target_fraction or candidate_fraction > min_candidate_fraction:
+            result[best_anchor] += count
+            selected_total += count
+        else:
+            result[barcode] += count
+
+    return result
+
+#########################
+#     I/O utilities     #
+#########################
 def read_fastq_seqs(path: str, limit: int) -> Iterable[str]:
     opener = gzip.open if path.lower().endswith(".gz") else open
     with opener(path, "rt") as fh:
