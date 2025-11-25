@@ -27,7 +27,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from itertools import accumulate
 from typing import Iterable, List, Optional, Sequence, Tuple
-from utils import build_consensus, revcomp_seq, iterate_sequences, compute_core_and_barcodes
+from utils import revcomp_seq, iterate_sequences, compute_core_and_barcodes
 
 try:
     import pysam
