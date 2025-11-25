@@ -250,8 +250,8 @@ def main():
 				rg_id = pu_to_rg.get(pu)
 				if rg_id:
 					aln.set_tag('RG', rg_id, value_type='Z')
-
-				if zm:= extract_zm_from_qname(qname) is None:
+				# ZM tag
+				if not (zm := extract_zm_from_qname(qname)):
 					zm = count
 				tag_getter_setter(aln, 'zm', zm, 'i')
 
