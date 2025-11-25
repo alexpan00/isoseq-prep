@@ -10,15 +10,12 @@ concatemers and, in that case, to extract the Kinnex linkers sequences.
 from __future__ import annotations
 
 import argparse
-import gzip
-import json
-import os
 import re
-from typing import Iterable, List, Tuple
+from typing import List, Tuple
 from collections import Counter
 import edlib
 from string import ascii_uppercase
-from infer_adapters import compute_core_and_barcodes
+from utils import compute_core_and_barcodes
 from utils import revcomp_seq, iterate_sequences
 try:
     import pysam
