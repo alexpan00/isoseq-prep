@@ -15,8 +15,10 @@ from typing import List, Tuple
 from collections import Counter
 import edlib
 from string import ascii_uppercase
-from utils import compute_core_and_barcodes
-from utils import revcomp_seq, iterate_sequences
+try:
+    from .utils import compute_core_and_barcodes, revcomp_seq, iterate_sequences
+except ImportError:
+    from utils import compute_core_and_barcodes, revcomp_seq, iterate_sequences
 try:
     import pysam
 except Exception:  # pragma: no cover - optional dependency
@@ -28,15 +30,19 @@ MIN_SUPPORT = 0.6
 N_THRESHOLD = 0.2
 
 
-def parse_args():
+def add_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("input", help="Input BAM or FASTQ (gz) file")
+    parser.add_argument("--sample", type=int, default=1000, help="Number of reads to sample (default: 1000)")
+    parser.add_argument("--min-poly", type=int, default=MIN_POLYA_LEN, help="Minimum consecutive A bases to call a polyA hit (default: 15)")
+    parser.add_argument("--post-len", type=int, default=100, help="Number of bases to extract after polyA (default: 100)")
+    parser.add_argument("--head-len", type=int, default=100, help="Number of bases to extract from read start (default: 100)")
+    parser.add_argument("--output", default=None, help="Write JSONL output to file (default: stdout)")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
+
+
+def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Detect Kinnex concatemer signatures")
-    p.add_argument("input", help="Input BAM or FASTQ (gz) file")
-    p.add_argument("--sample", type=int, default=1000, help="Number of reads to sample (default: 1000)")
-    p.add_argument("--min-poly", type=int, default=MIN_POLYA_LEN, help="Minimum consecutive A bases to call a polyA hit (default: 15)")
-    p.add_argument("--post-len", type=int, default=100, help="Number of bases to extract after polyA (default: 100)")
-    p.add_argument("--head-len", type=int, default=100, help="Number of bases to extract from read start (default: 100)")
-    p.add_argument("--output", default=None, help="Write JSONL output to file (default: stdout)")
-    p.add_argument("--verbose", action="store_true", help="Enable verbose output")
+    add_args(p)
     return p.parse_args()
 
 
@@ -258,8 +264,7 @@ def write_linkers_fasta(linkers: List[str], outfile: str)-> None:
         for idx, seq in enumerate(linkers):
             fh.write(f">{ascii_uppercase[idx]}\n{seq}\n")
 
-def main():
-    args = parse_args()
+def main(args: argparse.Namespace) -> None:
     outfile = args.output if args.output else "kinnex_linkers.fasta"
     # Opens the file and builds an iterator over sequences
     seq_iter = iterate_sequences(args.input, args.sample, return_name=True)
@@ -276,4 +281,5 @@ def main():
         print("No kinnex linkers detected.")
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    main(args)

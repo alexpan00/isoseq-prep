@@ -31,10 +31,7 @@ class PrimerExtractionError(RuntimeError):
     """Raised when the header lacks the information required to build primers."""
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Extract barcode primers from PacBio FL BAM headers and write a FASTA."
-    )
+def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "inputs",
         nargs="+",
@@ -58,6 +55,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Log progress information to stderr.",
     )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Extract barcode primers from PacBio FL BAM headers and write a FASTA."
+    )
+    add_args(parser)
     return parser.parse_args()
 
 
@@ -184,9 +188,7 @@ def write_fasta(output_path: str, barcode_count: int, five: Dict[int, str], thre
             fh.write(f">{end}p_bc10{idx_str}\n{seq}\n")
 
 
-def main() -> None:
-    args = parse_args()
-
+def main(args: argparse.Namespace) -> None:
     if os.path.exists(args.output):
         if not args.force:
             print(
@@ -243,4 +245,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(parse_args())

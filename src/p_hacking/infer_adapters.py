@@ -27,7 +27,11 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from itertools import accumulate
 from typing import Iterable, List, Optional, Sequence, Tuple
-from utils import revcomp_seq, iterate_sequences, compute_core_and_barcodes
+
+try:
+    from .utils import revcomp_seq, iterate_sequences, compute_core_and_barcodes
+except ImportError:
+    from utils import revcomp_seq, iterate_sequences, compute_core_and_barcodes
 
 try:
     import pysam
@@ -50,10 +54,7 @@ DEFAULT_SUPPORT_FRAC = 0.6
 MIN_POLYA_HIT_FRAC = 0.8  # minimum fraction of reads with polyA/polyT hits
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Infer multiplexed primers from polyA/polyT signatures"
-    )
+def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("input", help="Input BAM or FASTQ file (optionally gzipped)")
     parser.add_argument(
         "--sample",
@@ -133,6 +134,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print progress every 1000 reads",
     )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Infer multiplexed primers from polyA/polyT signatures"
+    )
+    add_args(parser)
     return parser.parse_args()
 
 
@@ -551,9 +559,7 @@ def write_adapter_fasta(results: dict, output_path: str) -> None:
     print(f"Adapter FASTA saved to {output_path}")
 
 
-def main() -> None:
-    args = parse_args()
-
+def main(args: argparse.Namespace) -> None:
     # Generate sequence iterator
     seq_iter = iterate_sequences(args.input, args.sample)
 
@@ -650,4 +656,4 @@ def main() -> None:
             write_adapter_fasta(primers_res, fasta_path)
 
 if __name__ == "__main__":
-    main()
+    main(parse_args())

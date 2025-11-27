@@ -12,7 +12,11 @@ from __future__ import annotations
 import argparse
 import os
 from typing import Dict, Iterable, List, Sequence, Tuple, Optional
-from utils import revcomp_seq
+
+try:
+    from .utils import revcomp_seq
+except ImportError:
+    from utils import revcomp_seq
 
 import edlib  # type: ignore
 import pysam
@@ -30,10 +34,7 @@ COLORS = {
 Annotation = Tuple[int, int, str, int, str]
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Highlight primer and polyA/polyT signatures inside reads."
-    )
+def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--bam",
         default="discarded.bam",
@@ -74,6 +75,13 @@ def parse_args() -> argparse.Namespace:
         default=80,
         help="Wrap highlighted sequence every N bases (default: 80)",
     )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Highlight primer and polyA/polyT signatures inside reads."
+    )
+    add_args(parser)
     return parser.parse_args()
 
 
@@ -236,9 +244,7 @@ def iterate_reads(bam_path: str, limit: int) -> Iterable[pysam.AlignedSegment]:
                 break
 
 
-def main() -> None:
-    args = parse_args()
-
+def main(args: argparse.Namespace) -> None:
     primers = load_primers(args.primers)
 
     for aln in iterate_reads(args.bam, args.max_reads):
@@ -279,4 +285,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(parse_args())

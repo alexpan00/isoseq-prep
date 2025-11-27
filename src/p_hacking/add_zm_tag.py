@@ -44,10 +44,7 @@ DEFAULT_QUALITY = 0.99
 DEFAULT_NP = 10
 
 
-def parse_args():
-	p = argparse.ArgumentParser(
-		description="Add/replace `zm` integer tag in a BAM based on read name."
-	)
+def add_args(p: argparse.ArgumentParser) -> None:
 	p.add_argument("input", help="Input BAM file (indexed or unindexed)")
 	p.add_argument("-o", "--output", help="Output BAM path. If omitted, will create '<input>.zm.bam'")
 	p.add_argument("-f", "--force", action="store_true", help="Overwrite output if it exists")
@@ -55,6 +52,13 @@ def parse_args():
 	p.add_argument("--compute_quality", action="store_true", help="Compute basewise accuracy from quality scores to assign rq tag if missing")
 	p.add_argument("--np-tag", type=int, default=DEFAULT_NP, help="If provided, add np tag with this value when missing. (default: 10)")
 	p.add_argument("-v", "--verbose", action="store_true", help="Print progress every 100k reads")
+
+
+def parse_args():
+	p = argparse.ArgumentParser(
+		description="Add/replace `zm` integer tag in a BAM based on read name."
+	)
+	add_args(p)
 	return p.parse_args()
 
 
@@ -217,9 +221,7 @@ def tag_getter_setter(aln: pysam.AlignedSegment, tag: str, value, value_type: st
 	except KeyError:
 		aln.set_tag(tag, value, value_type=value_type)
 
-def main():
-	args = parse_args()
-
+def main(args: argparse.Namespace) -> None:
 	# I/O paths
 	in_path = args.input
 	out_path = args.output or (in_path + ".zm.bam" if not in_path.lower().endswith('.bam') else in_path[:-4] + ".zm.bam")
@@ -275,5 +277,5 @@ def main():
 
 
 if __name__ == '__main__':
-	main()
+	main(parse_args())
 
