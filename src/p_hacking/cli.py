@@ -92,10 +92,10 @@ def main():
     build_adapters_fasta.add_args(parser_build_fasta)
     parser_build_fasta.set_defaults(func=build_adapters_fasta.main)
 
-    # # Parse arguments
-    # if len(sys.argv) == 1:
-    #     parser.print_help(sys.stderr)
-    #     sys.exit(1)
+    # Parse arguments
+    if len(sys.argv) == 1:
+        parser.print_help(sys.stderr)
+        sys.exit(1)
 
     args = parser.parse_args()
     
