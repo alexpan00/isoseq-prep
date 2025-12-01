@@ -37,7 +37,6 @@ import os
 import re
 import sys
 import shutil
-import subprocess
 import tempfile
 
 DEFAULT_QUALITY = 0.99
@@ -115,17 +114,12 @@ def ensure_bam_input(in_path, verbose=False):
 
 	tmp_fd, tmp_path = tempfile.mkstemp(prefix="add_zm_", suffix=".bam")
 	os.close(tmp_fd)
-	cmd = [
-		'samtools',
-		'import',
-		'-o', tmp_path,
-		in_path,
-	]
+
 	if verbose:
-		print(f"Converting FASTQ to BAM via: {' '.join(cmd)}", file=sys.stderr)
+		print(f"Converting FASTQ to BAM", file=sys.stderr)
 	try:
-		subprocess.run(cmd, check=True)
-	except subprocess.CalledProcessError as exc:
+		pysam.samtools.fqimport("-o", tmp_path, in_path, catch_stdout=False)
+	except Exception as exc:
 		print(f"Error: samtools import failed with exit code {exc.returncode}.", file=sys.stderr)
 		if os.path.exists(tmp_path):
 			os.remove(tmp_path)
