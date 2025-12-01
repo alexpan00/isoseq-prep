@@ -36,7 +36,7 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--min-poly", type=int, default=MIN_POLYA_LEN, help="Minimum consecutive A bases to call a polyA hit (default: 15)")
     parser.add_argument("--post-len", type=int, default=100, help="Number of bases to extract after polyA (default: 100)")
     parser.add_argument("--head-len", type=int, default=100, help="Number of bases to extract from read start (default: 100)")
-    parser.add_argument("--output", default=None, help="Write JSONL output to file (default: stdout)")
+    parser.add_argument("--output", default="kinnex_linkers.fasta", help="Name of the file to write Kinnex linkers (default: kinnex_linkers.fasta)")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
 
 
@@ -265,7 +265,7 @@ def write_linkers_fasta(linkers: List[str], outfile: str)-> None:
             fh.write(f">{ascii_uppercase[idx]}\n{seq}\n")
 
 def main(args: argparse.Namespace) -> None:
-    outfile = args.output if args.output else "kinnex_linkers.fasta"
+    outfile = args.output
     # Opens the file and builds an iterator over sequences
     seq_iter = iterate_sequences(args.input, args.sample, return_name=True)
 
