@@ -22,13 +22,12 @@ PROGRESS_INTERVAL = 100_000
 
 
 def add_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("input", help="Input BAM file (indexed or unindexed)")
+    parser.add_argument("input", help="Input BAM file")
     parser.add_argument(
         "-o",
         "--output",
         help=(
-            "Output BAM path. If omitted, will create '<input>.bx.bam' when the input"
-            " ends with '.bam', otherwise '<input>.bx.bam'."
+            "Output BAM path. If omitted, will create '<input>.bx.bam'."
         ),
     )
     parser.add_argument(

@@ -36,7 +36,6 @@ import argparse
 import os
 import re
 import sys
-import shutil
 import tempfile
 
 DEFAULT_QUALITY = 0.99
@@ -44,13 +43,29 @@ DEFAULT_NP = 10
 
 
 def add_args(p: argparse.ArgumentParser) -> None:
-	p.add_argument("input", help="Input BAM file (indexed or unindexed)")
-	p.add_argument("-o", "--output", help="Output BAM path. If omitted, will create '<input>.zm.bam'")
-	p.add_argument("-f", "--force", action="store_true", help="Overwrite output if it exists")
-	p.add_argument("--default-quality", type=float, default=DEFAULT_QUALITY, help="Default RQ value to assign if missing (default: 0.99) or --compute_quality flag is not used")
-	p.add_argument("--compute_quality", action="store_true", help="Compute basewise accuracy from quality scores to assign rq tag if missing")
-	p.add_argument("--np-tag", type=int, default=DEFAULT_NP, help="If provided, add np tag with this value when missing. (default: 10)")
-	p.add_argument("-v", "--verbose", action="store_true", help="Print progress every 100k reads")
+	p.add_argument("input", help="Input BAM file")
+	p.add_argument("-o", 
+                "--output", 
+                help="Output BAM path. If omitted, will create '<input>.zm.bam'")
+	p.add_argument("-f", 
+                "--force", 
+                action="store_true", 
+                help="Overwrite output if it exists")
+	group = p.add_mutually_exclusive_group()
+	group.add_argument("--default-quality", 
+                type=float, default=DEFAULT_QUALITY, 
+                help="Default RQ value to assign if missing (default: 0.99) or --compute_quality flag is not used")
+	group.add_argument("--compute_quality", 
+                action="store_true", 
+                help="Compute basewise accuracy from quality scores to assign rq tag if missing")
+	p.add_argument("--np-tag",
+                type=int, 
+                default=DEFAULT_NP, 
+                help="If provided, add np tag with this value when missing. (default: 10)")
+	p.add_argument("-v", 
+                "--verbose", 
+                action="store_true", 
+                help="Print progress every 100k reads")
 
 
 def parse_args():
@@ -107,10 +122,6 @@ def ensure_bam_input(in_path, verbose=False):
 	"""Return a BAM path, converting FASTQ inputs via samtools import when needed."""
 	if in_path.lower().endswith('.bam'):
 		return in_path, None
-
-	if shutil.which('samtools') is None:
-		print("Error: samtools executable not found in PATH; required to convert FASTQ inputs.", file=sys.stderr)
-		sys.exit(1)
 
 	tmp_fd, tmp_path = tempfile.mkstemp(prefix="add_zm_", suffix=".bam")
 	os.close(tmp_fd)

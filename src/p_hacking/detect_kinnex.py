@@ -180,7 +180,6 @@ def infer_kinnex_from_reads(processed_reads: List[dict], verbose: bool) -> list[
     
     # Extract the first kinnex adapter sequence
     a_sequence = seq_5p[:-len(adapter_5p)]
-    a_len = len(a_sequence)
         
     # Extract the 3' adapter
     adapter_3p = seq_3p[:-len(adapter_5p)]
