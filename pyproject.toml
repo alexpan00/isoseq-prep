@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "p_hacking"
+version = "0.1.0"
+description = "A suite of tools for PacBio data preprocessing and manipulation"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [
+  {name = "Alejandro Paniagua", email = "alexpan00@example.com"}
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "pysam",
+    "edlib",
+    "matplotlib",
+]
+
+[project.scripts]
+p-hacking = "p_hacking.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

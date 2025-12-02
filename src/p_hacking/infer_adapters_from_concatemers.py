@@ -15,7 +15,11 @@ import os
 import re
 from collections import Counter
 from typing import Iterable, List, Optional, Tuple
-from utils import build_consensus, revcomp_seq, iterate_sequences
+
+try:
+    from .utils import build_consensus, revcomp_seq, iterate_sequences
+except ImportError:
+    from utils import build_consensus, revcomp_seq, iterate_sequences
 
 try:
     import pysam
@@ -29,10 +33,7 @@ DEFAULT_SUPPORT_FRAC = 0.8
 END_WINDOW = 50  # bases from read end to search for polyA/polyT
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Infer multiplexed primers from polyA/polyT signatures"
-    )
+def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("input", help="Input BAM or FASTQ file (optionally gzipped)")
     parser.add_argument(
         "--sample",
@@ -82,6 +83,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print progress every 1000 reads",
     )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Infer multiplexed primers from polyA/polyT signatures"
+    )
+    add_args(parser)
     return parser.parse_args()
 
 
@@ -222,9 +230,7 @@ def write_adapter_fasta(results: dict, output_path: str) -> None:
             fh.write(core + "\n")
         
         
-def main() -> None:
-    args = parse_args()
-
+def main(args: argparse.Namespace) -> None:
     # Generate sequence iterator
     seq_iter = iterate_sequences(args.input, args.sample)
 
@@ -263,4 +269,4 @@ def main() -> None:
         print("No primer core detected.")
 
 if __name__ == "__main__":
-    main()
+    main(parse_args())

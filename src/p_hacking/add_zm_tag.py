@@ -31,30 +31,48 @@ Example:
 
 """
 
+from typing import Optional
 import pysam
 import argparse
 import os
-import re
 import sys
-import shutil
-import subprocess
 import tempfile
 
 DEFAULT_QUALITY = 0.99
 DEFAULT_NP = 10
 
 
+def add_args(p: argparse.ArgumentParser) -> None:
+	p.add_argument("input", help="Input BAM file")
+	p.add_argument("-o", 
+                "--output", 
+                help="Output BAM path. If omitted, will create '<input>.zm.bam'")
+	p.add_argument("-f", 
+                "--force", 
+                action="store_true", 
+                help="Overwrite output if it exists")
+	group = p.add_mutually_exclusive_group()
+	group.add_argument("--default-quality", 
+                type=float, default=DEFAULT_QUALITY, 
+                help="Default RQ value to assign if missing (default: 0.99) or --compute_quality flag is not used")
+	group.add_argument("--compute_quality", 
+                action="store_true", 
+                help="Compute basewise accuracy from quality scores to assign rq tag if missing")
+	p.add_argument("--np-tag",
+                type=int, 
+                default=DEFAULT_NP, 
+                help="If provided, add np tag with this value when missing. (default: 10)")
+	p.add_argument("-v", 
+                "--verbose", 
+                action="store_true", 
+                help="Print progress every 100k reads")
+
+
 def parse_args():
 	p = argparse.ArgumentParser(
 		description="Add/replace `zm` integer tag in a BAM based on read name."
 	)
-	p.add_argument("input", help="Input BAM file (indexed or unindexed)")
-	p.add_argument("-o", "--output", help="Output BAM path. If omitted, will create '<input>.zm.bam'")
-	p.add_argument("-f", "--force", action="store_true", help="Overwrite output if it exists")
-	p.add_argument("--default-quality", type=float, default=DEFAULT_QUALITY, help="Default RQ value to assign if missing (default: 0.99) or --compute_quality flag is not used")
-	p.add_argument("--compute_quality", action="store_true", help="Compute basewise accuracy from quality scores to assign rq tag if missing")
-	p.add_argument("--np-tag", type=int, default=DEFAULT_NP, help="If provided, add np tag with this value when missing. (default: 10)")
-	p.add_argument("-v", "--verbose", action="store_true", help="Print progress every 100k reads")
+	add_args(p)
 	return p.parse_args()
 
 
@@ -67,61 +85,81 @@ def extract_zm_from_qname(qname):
 	  'movie/42' -> 42
 	  'no_slash' -> None
 	"""
-	if not qname:
-		return None
-	m = re.match(r'^[^/]+/(\d+)', qname)
+
+	m = qname.split("/")[1] if '/' in qname else None
 	if m:
 		try:
-			return int(m.group(1))
+			return int(m)
 		except ValueError:
 			return None
 	return None
 
 
-def derive_pu_from_qname(qname):
-	"""Return the prefix before the first '/' in the read name or 'unknown'."""
-	qn = qname or ''
-	pu = qn.split('/', 1)[0] if '/' in qn else qn
-	return pu if pu else 'unknown'
+def derive_pu_from_qname(qname)-> str:
+	"""Return the prefix before the first '/' in the read name or 'unknown'.
+ 	
+	Args:
+		qname (str): read query name
+	
+	Returns:
+		str: platform unit (PU) value
+	
+ 	Examples:
+		'm64011_180916_202355/12345/ccs' -> 'm64011_180916_202355'
+		'movie/42' -> 'movie'
+		'no_slash' -> 'unknown'
+		'/0_100' -> 'unknown'
+	"""
+	pu = qname.split('/', 1)[0] if '/' in qname else "unknown"
+	return pu if pu else "unknown"
 
 
-def collect_header_and_pus(in_path):
-	"""Scan the BAM once to collect header info and observed PU values."""
+def collect_header_and_pus(in_path: str) -> tuple[dict, set]:
+	"""Scan the BAM once to collect header info and observed PU values.
+ 
+ 	Args:
+  		in_path (str): path to input BAM file
+    
+    Returns:
+		tuple[dict, set]: (header dictionary, set of observed PU values)
+    """
 	pu_values = set()
 	with pysam.AlignmentFile(in_path, "rb", check_sq=False) as inh:
+		# Read the header
 		header_obj = inh.header
 		if hasattr(header_obj, 'to_dict'):
 			header_dict = header_obj.to_dict()
 		else:
 			header_dict = dict(header_obj)
+
+		# Scan alignments for PU values
 		for aln in inh.fetch(until_eof=True):
 			pu = derive_pu_from_qname(aln.query_name)
 			pu_values.add(pu)
 	return header_dict, pu_values
 
 
-def ensure_bam_input(in_path, verbose=False):
-	"""Return a BAM path, converting FASTQ inputs via samtools import when needed."""
+def ensure_bam_input(in_path, verbose=False)-> tuple[str, Optional[str]]:
+	"""Return a BAM path, converting FASTQ inputs via samtools import when needed.
+ 
+ 	Args:
+		in_path (str): input file path (BAM or FASTQ)
+		verbose (bool): whether to print progress messages
+  
+	Returns:
+		tuple[str, Optional[str]]: (BAM path, temp file path if conversion done)
+  	"""
 	if in_path.lower().endswith('.bam'):
 		return in_path, None
 
-	if shutil.which('samtools') is None:
-		print("Error: samtools executable not found in PATH; required to convert FASTQ inputs.", file=sys.stderr)
-		sys.exit(1)
-
 	tmp_fd, tmp_path = tempfile.mkstemp(prefix="add_zm_", suffix=".bam")
 	os.close(tmp_fd)
-	cmd = [
-		'samtools',
-		'import',
-		'-o', tmp_path,
-		in_path,
-	]
+
 	if verbose:
-		print(f"Converting FASTQ to BAM via: {' '.join(cmd)}", file=sys.stderr)
+		print(f"Converting FASTQ to BAM", file=sys.stderr)
 	try:
-		subprocess.run(cmd, check=True)
-	except subprocess.CalledProcessError as exc:
+		pysam.samtools.fqimport("-o", tmp_path, in_path, catch_stdout=False)
+	except Exception as exc:
 		print(f"Error: samtools import failed with exit code {exc.returncode}.", file=sys.stderr)
 		if os.path.exists(tmp_path):
 			os.remove(tmp_path)
@@ -138,7 +176,7 @@ def prepare_header(header_dict: dict, pu_values: set) -> tuple[dict, dict]:
 	Returns:
 		Tuple of (updated_header_dict, pu_to_rg_dict)
   	"""
-	rg_list = list(header_dict.get('RG', []) or [])
+	rg_list = header_dict.get('RG', [])
 	pu_to_rg = {}
 	used_ids = set()
 	next_index = len(rg_list)
@@ -146,24 +184,24 @@ def prepare_header(header_dict: dict, pu_values: set) -> tuple[dict, dict]:
 	# check if the existing RG entries have IDs and PUs
 	for rg in rg_list:
 		rg_id = rg.get('ID')
+  		# I assume that all RG should have IDs, but keep this here jic 
 		# if there is not id create one
-		if not rg_id:
-			rg_id = f"RG{next_index}"
-			while rg_id in used_ids:
-				next_index += 1
-				rg_id = f"RG{next_index}"
-			next_index += 1
-			rg['ID'] = rg_id
-		if rg_id:
-			used_ids.add(rg_id)
+		# if not rg_id:
+		# 	rg_id = f"RG{next_index}"
+		# 	while rg_id in used_ids:
+		# 		next_index += 1
+		# 		rg_id = f"RG{next_index}"
+		# 	next_index += 1
+		# 	rg['ID'] = rg_id
+		used_ids.add(rg_id)
 
 		# if there is not PU, assign one from the set
 		if rg.get('PU') is None:
 			pu_value = pu_values.pop()
 			rg['PU'] = pu_value
-		pu_to_rg.setdefault(pu_value, rg_id)
+		pu_to_rg[pu_value] = rg_id
 		# Ensure DS tag includes READTYPE=CCS, otherwise isoseq refine will complain
-		ds_value = rg.get('DS', '') or ''
+		ds_value = rg.get('DS', '')
 		if 'READTYPE=CCS' not in ds_value:
 			separator = '' if not ds_value or ds_value.endswith(';') else ';'
 			rg['DS'] = f"{ds_value}{separator}READTYPE=CCS" if ds_value else 'READTYPE=CCS'
@@ -217,9 +255,7 @@ def tag_getter_setter(aln: pysam.AlignedSegment, tag: str, value, value_type: st
 	except KeyError:
 		aln.set_tag(tag, value, value_type=value_type)
 
-def main():
-	args = parse_args()
-
+def main(args: argparse.Namespace) -> None:
 	# I/O paths
 	in_path = args.input
 	out_path = args.output or (in_path + ".zm.bam" if not in_path.lower().endswith('.bam') else in_path[:-4] + ".zm.bam")
@@ -235,6 +271,10 @@ def main():
 
 		# First pass: collect header and PU values
 		header_dict, pu_values = collect_header_and_pus(bam_path)
+  
+		# Probably not PacBio data or modified during submission
+		if "unknown" in pu_values and len(pu_values) == 1:
+			raise ValueError("All reads have unknown PU values; cannot assign RG lines.")
 		header_dict, pu_to_rg = prepare_header(header_dict, pu_values)
 
 		if args.verbose and pu_values:
@@ -248,8 +288,7 @@ def main():
 				qname = aln.query_name or ''
 				pu = derive_pu_from_qname(qname)
 				rg_id = pu_to_rg.get(pu)
-				if rg_id:
-					aln.set_tag('RG', rg_id, value_type='Z')
+				aln.set_tag('RG', rg_id, value_type='Z')
 				# ZM tag
 				if not (zm := extract_zm_from_qname(qname)):
 					zm = count
@@ -275,5 +314,5 @@ def main():
 
 
 if __name__ == '__main__':
-	main()
+	main(parse_args())
 

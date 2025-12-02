@@ -21,17 +21,13 @@ DEFAULT_BC2_LEN = 39
 PROGRESS_INTERVAL = 100_000
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Add/replace `bx` array tag in a BAM file."
-    )
-    parser.add_argument("input", help="Input BAM file (indexed or unindexed)")
+def add_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("input", help="Input BAM file")
     parser.add_argument(
         "-o",
         "--output",
         help=(
-            "Output BAM path. If omitted, will create '<input>.bx.bam' when the input"
-            " ends with '.bam', otherwise '<input>.bx.bam'."
+            "Output BAM path. If omitted, will create '<input>.bx.bam'."
         ),
     )
     parser.add_argument(
@@ -58,10 +54,27 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=f"Print progress every {PROGRESS_INTERVAL:,} reads",
     )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Add/replace `bx` array tag in a BAM file."
+    )
+    add_args(parser)
     return parser.parse_args()
 
 
 def derive_output_path(input_path: str, explicit_output: Optional[str]) -> str:
+    '''
+    Derive output path from input if explicit output wasn't provided
+
+    Args:
+        input_path (str): path to input bam file
+        explicit_output (Optional[str]): explicit output path, if provided
+
+    Returns:
+        str: derived output path
+    '''
     if explicit_output:
         return explicit_output
     if input_path.lower().endswith(".bam"):
@@ -69,9 +82,7 @@ def derive_output_path(input_path: str, explicit_output: Optional[str]) -> str:
     return f"{input_path}.bx.bam"
 
 
-def main() -> None:
-    args = parse_args()
-
+def main(args: argparse.Namespace) -> None:
     in_path = args.input
     out_path = derive_output_path(in_path, args.output)
 
@@ -107,4 +118,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(parse_args())

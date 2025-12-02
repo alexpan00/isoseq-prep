@@ -39,8 +39,7 @@ Currently included scripts
       providing a constant PU and/or mapping logic.
   - Notes & dependencies:
     - Requires `pysam` to read/write BAM files. If you provide FASTQ input
-      the script will call `samtools import` to make a temporary BAM, so
-      `samtools` must be available in your PATH when using FASTQ inputs.
+      the script will call `samtools import` to make a temporary BAM.
     - The script will add or update an `rq` tag (read quality) if missing. By
       default it writes a constant value (configurable with
       `--default-quality`), or if `--compute_quality` is supplied the script
