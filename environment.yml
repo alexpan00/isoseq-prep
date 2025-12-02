@@ -1,4 +1,4 @@
-name: pacbio_tools
+name: isoseq-prep
 channels:
   - conda-forge
   - bioconda

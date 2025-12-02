@@ -1,40 +1,56 @@
-# PacBio Data Preparation Scripts
+# IsoSeq Prep (p-hacking)
 
-This repository contains a collection of small scripts and helper tools to assist with preparing PacBio (Pacific Biosciences) sequencing data, especially data downloaded from public databases or sequencing providers.
+Are you tired of trying to use public PacBio data and not being able to run the `isoseq` pipeline because it is FASTQ or missing some tags? Here is your solution!
 
-## Purpose
+This repository contains a suite of tools (`p-hacking`) designed to massage, fix, and prepare PacBio sequencing data—especially data downloaded from public archives like SRA or ENA—so it plays nice with standard PacBio workflows like `isoseq refine` or `isoseq cluster`.
 
-- Collect and document reproducible scripts for typical pre-processing tasks for PacBio reads (file organization, format conversions, basic QC, subsetting, and simple metadata parsing).
-- Make it easier to standardize steps before downstream analysis (assembly, polishing, or mapping).
+## Why this exists
 
-## What you'll find here
+Public data is great, but it often comes stripped of the rich metadata (BAM tags) that PacBio tools rely on. If you've ever stared at an error message complaining about missing `zm`, `rq`, or `np` tags, or wondered why your "CCS" reads are being ignored because they're in a FASTQ file, this toolkit is for you.
 
-- Utility scripts for moving, renaming, and validating FASTQ/FASTA/BAM files.
-- Small helpers for extracting metadata from headers or accompanying files.
-- Converters or wrappers that simplify common command-line tools used with PacBio data.
+We provide utilities to:
+- Convert FASTQ to BAM while injecting the necessary tags (`zm`, `rq`, `np`, `RG`).
+- Detect and extract Kinnex concatemer signatures.
+- Infer multiplexed primer sequences from data.
+- Fix or add barcode tags (`bx`) to make downstream tools happy.
 
-(Exact scripts and filenames may vary — check the `scripts/` directory if present.)
+## Installation
+
+The tools are packaged as a Python package. You can install it in editable mode so you can tweak things if needed:
+
+```bash
+# Clone the repo
+git clone https://github.com/alexpan00/isoseq-prep.git
+cd isoseq-prep
+
+# Install dependencies and the package
+pip install -e .
+```
 
 ## Usage
 
-1. Inspect the repository structure and the `scripts/` folder for available utilities.
-2. Read the top of each script for usage instructions (most scripts include a `--help` or a short usage comment).
-3. Run scripts on a copy of your data first. Many scripts assume standard PacBio file headers but include checks where possible.
+Once installed, you have a single command `p-hacking` that exposes all the utilities.
 
+```bash
+# See all available commands
+p-hacking --help
 
-## Conventions & Assumptions
+# Example: Fix a BAM file by adding ZMW and Read Quality tags
+p-hacking add-zm-tag input.bam -o ready_for_isoseq.bam --compute_quality
 
-- Scripts target Linux/Bash environments by default.
-- Input files downloaded from public repositories (ENA, SRA, or provider FTPs) may need renaming or decompression; scripts often expect uncompressed files or will auto-detect compression.
-- Where necessary, scripts will use common bioinformatics tools (e.g., samtools, seqtk); ensure those are installed and available in your PATH.
+# Example: Detect Kinnex concatemers
+p-hacking detect-kinnex reads.bam --output linkers.fasta
+```
 
-## Additions & Contributions
+## What's inside?
 
-If you'd like to add scripts or improve documentation, please:
+- **`add-zm-tag`**: The MVP. Takes a BAM (or FASTQ!) and adds the `zm` (ZMW), `rq` (Read Quality), and `np` (Num Passes) tags. It also fixes the `@RG` header so `isoseq` knows the data is CCS.
+- **`detect-kinnex`**: Finds and extracts Kinnex linker sequences from concatemer reads.
+- **`infer-adapters`**: Guesses primer sequences from your data if you don't have the barcode file.
+- **`add-bx-tag`**: Adds barcode tags if you need to fake them or fix them.
+- **`build-adapters-fasta`**: Reconstructs a primer FASTA file from BAM headers.
 
-- Add a new script to the `scripts/` directory with a clear header explaining inputs/outputs and dependencies.
-- Open a pull request with a short description and an example of input/output.
+## Contributing
 
-## Contact
+Found a new way public data is broken? Feel free to open an issue or submit a PR with a new script!
 
-For questions or help, open an issue describing the problem, including sample filenames and exact commands you ran.
