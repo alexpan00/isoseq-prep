@@ -65,6 +65,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def derive_output_path(input_path: str, explicit_output: Optional[str]) -> str:
+    '''
+    Derive output path from input if explicit output wasn't provided
+
+    Args:
+        input_path (str): path to input bam file
+        explicit_output (Optional[str]): explicit output path, if provided
+
+    Returns:
+        str: derived output path
+    '''
     if explicit_output:
         return explicit_output
     if input_path.lower().endswith(".bam"):
