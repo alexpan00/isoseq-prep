@@ -66,6 +66,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def extract_barcode_count(ds_value: str) -> Optional[int]:
+    '''
+    Extract abrcode count from bam header
+
+    Args:
+        ds_value (str): DS field from RG entry
+
+    Raises:
+        PrimerExtractionError: raised if BarcodeCount value is invalid
+
+    Returns:
+        Optional[int]: Number of barcodes, or None if not found
+    '''
     for part in ds_value.split(";"):
         part = part.strip()
         if part.startswith("BarcodeCount="):
@@ -127,7 +139,7 @@ def harvest_from_bam(path: str, verbose: bool = False) -> Tuple[int, Dict[int, s
     with pysam.AlignmentFile(path, "rb", check_sq=False) as bam:
         header_obj = bam.header
         header_dict = header_obj.to_dict() if hasattr(header_obj, "to_dict") else dict(header_obj)
-        rg_entries: Sequence[Dict[str, str]] = header_dict.get("RG", []) or []
+        rg_entries: Sequence[Dict[str, str]] = header_dict.get("RG", [])
         if not rg_entries:
             raise PrimerExtractionError(f"No @RG entries found in header of {path}")
 
@@ -142,6 +154,7 @@ def harvest_from_bam(path: str, verbose: bool = False) -> Tuple[int, Dict[int, s
                 raise PrimerExtractionError(
                     f"RG ID '{rg.get('ID', '<unknown>')}' missing BarcodeCount in DS field."
                 )
+            # check that all the RG entries agree on the barcode count
             if barcode_count is None:
                 barcode_count = bc_count
             elif bc_count != barcode_count:
@@ -204,6 +217,8 @@ def main(args: argparse.Namespace) -> None:
 
     for path in args.inputs:
         bc_count, five, three = harvest_from_bam(path, verbose=args.verbose)
+        
+        # check if all the samples have the same number of barcodes
         if expected_count is None:
             expected_count = bc_count
         elif bc_count != expected_count:
@@ -213,6 +228,7 @@ def main(args: argparse.Namespace) -> None:
             )
             sys.exit(1)
 
+        # check that all the barcodes from different samples agree
         for idx, seq in five.items():
             if idx in combined_five and combined_five[idx] != seq:
                 print(
