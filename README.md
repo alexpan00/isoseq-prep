@@ -2,7 +2,7 @@
 
 Are you tired of trying to use public PacBio data and not being able to run the `isoseq` pipeline because it is FASTQ or missing some tags? Here is your solution!
 
-This repository contains a suite of tools (`p-hacking`) designed to massage, fix, and prepare PacBio sequencing data—especially data downloaded from public archives like SRA or ENA—so it plays nice with standard PacBio workflows like `isoseq refine` or `isoseq cluster`.
+This repository contains a suite of tools (`p-hacking`) designed to massage, fix, and prepare PacBio sequencing data, especially data downloaded from public archives like SRA or ENA, so it plays nice with standard PacBio workflows like `isoseq refine` or `isoseq cluster`.
 
 ## Why this exists
 
