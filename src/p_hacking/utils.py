@@ -289,13 +289,33 @@ def read_bam_seqs(path: str, limit: int, return_name: bool) -> Iterable[str]:
                 if count >= limit:
                     break
 
+def read_fasta_seqs(path: str, limit: int) -> Iterable[str]:
+    opener = gzip.open if path.lower().endswith(".gz") else open
+    with opener(path, "rt") as fh:
+        count = 0
+        seq_lines = []
+        for line in fh:
+            line = line.strip()
+            if line.startswith(">"):
+                if seq_lines:
+                    yield "".join(seq_lines)
+                    count += 1
+                    if count >= limit:
+                        return
+                    seq_lines = []
+            else:
+                seq_lines.append(line)
+        if seq_lines and count < limit:
+            yield "".join(seq_lines)
 
 def iterate_sequences(path: str, sample: int, return_name: bool = False) -> Iterable[str]:
     path_lower = path.lower()
     if path_lower.endswith(".bam"):
         return read_bam_seqs(path, sample, return_name=return_name)
-    if path_lower.endswith((".fastq", ".fq", ".fastq.gz", ".fq.gz")):
+    elif path_lower.endswith((".fastq", ".fq", ".fastq.gz", ".fq.gz")):
         return read_fastq_seqs(path, sample)
+    elif path_lower.endswith((".fasta", ".fa", ".fasta.gz", ".fa.gz")):
+        return read_fasta_seqs(path, sample)
     # fallback attempts
     if pysam is not None and os.path.exists(path):
         try:

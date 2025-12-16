@@ -50,10 +50,14 @@ Currently included scripts
       tools (e.g., `isoseq refine`) receive the expected metadata.
 
 - `add_bx_tag.py`
-  - I don't recommend anyone to use this script. I just created it because I sow
+  - Found a real use case for this script. Samples in SRA Bioproject `PRJNA1282209`,
+    like `SRR34195769`, are FL reads but lack `bx` tag. Therefore it is impossible 
+    to run `isoseq refine`. Samples were also missing `RG` in header, so now
+    the script also tries to find `RG` in reads and it to the header at the end.
+  - ~~I don't recommend anyone to use this script. I just created it because I sow
     this issue on [GitHub](https://github.com/PacificBiosciences/pbbioconda/issues/150)
     and thought that you should be able to run the tool in your data. After
-    that I realize why it was a bad idea.
+    that I realize why it was a bad idea.~~
   - Purpose: Add or replace a per-read `bx` array tag (`bx:B:i,<len1>,<len2>`) on every
     alignment. Defaults to barcode length values 40 and 39, with CLI flags to
     override them.
