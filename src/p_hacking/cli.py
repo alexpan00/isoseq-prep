@@ -1,6 +1,6 @@
 import argparse
 import sys
-from p_hacking import detect_kinnex, infer_adapters, inspect_adapters, infer_adapters_from_concatemers, add_bx_tag, add_zm_tag, build_adapters_fasta
+from p_hacking import add_SM_tag, detect_kinnex, infer_adapters, inspect_adapters, infer_adapters_from_concatemers, add_bx_tag, add_zm_tag, build_adapters_fasta
 
 def main():
     parser = argparse.ArgumentParser(description="PacBio Tools Suite")
@@ -91,6 +91,18 @@ def main():
     )
     build_adapters_fasta.add_args(parser_build_fasta)
     parser_build_fasta.set_defaults(func=build_adapters_fasta.main)
+    
+    # ---------------------------------------------------------
+    # Command: add-sm-tag
+    # ---------------------------------------------------------
+    parser_add_sm = subparsers.add_parser(
+        "add-sm-tag", 
+        help="Replace SM tags in BAM header with new sample names",
+        description=add_SM_tag.__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    add_SM_tag.add_args(parser_add_sm)
+    parser_add_sm.set_defaults(func=add_SM_tag.main)
 
     # Parse arguments
     if len(sys.argv) == 1:
